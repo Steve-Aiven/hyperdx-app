@@ -36,7 +36,6 @@ import { useDisplayTimeZone } from '@/useDisplayTimeZone';
 import { UserPreferencesModal } from '@/UserPreferencesModal';
 
 import {
-  AppNavCloudBanner,
   AppNavContext,
   AppNavHelpMenu,
   AppNavLink,
@@ -519,7 +518,6 @@ export default function AppNav({ fixed = false }: { fixed?: boolean }) {
               className={styles.onboardingSection}
             >
               <OnboardingChecklist onAddDataClick={openInstallInstructions} />
-              <AppNavCloudBanner />
             </div>
           )}
         </ScrollArea>
