@@ -14,7 +14,6 @@ import {
   IconSettings,
 } from '@tabler/icons-react';
 
-import { useBrandDisplayName, useLogomark } from './brand';
 import { IS_K8S_DASHBOARD_ENABLED } from './config';
 import { useDashboards } from './dashboard';
 import { useSavedSearches } from './savedSearch';
@@ -23,8 +22,6 @@ import '@mantine/spotlight/styles.css';
 
 export const useSpotlightActions = () => {
   const router = useRouter();
-  const brandName = useBrandDisplayName();
-  const logomark = useLogomark({ size: 16 });
 
   const { data: logViewsData } = useSavedSearches();
   const { data: dashboardsData } = useDashboards();
@@ -193,23 +190,10 @@ export const useSpotlightActions = () => {
           );
         },
       },
-      {
-        id: 'cloud',
-        group: 'Menu',
-        leftSection: logomark,
-        label: `${brandName} Cloud`,
-        description: `Ready to use ${brandName} Cloud? Get started for free.`,
-        keywords: ['account', 'profile'],
-        onClick: () => {
-          router.push(
-            'https://clickhouse.com/docs/use-cases/observability/clickstack/getting-started#deploy-with-clickhouse-cloud',
-          );
-        },
-      },
     );
 
     return logViewActions;
-  }, [brandName, logomark, logViewsData, dashboardsData, router]);
+  }, [logViewsData, dashboardsData, router]);
 
   return { actions };
 };
