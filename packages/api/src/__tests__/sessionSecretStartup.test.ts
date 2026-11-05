@@ -8,7 +8,13 @@ jest.mock('@/controllers/team', () => ({
 jest.mock('@/migrations', () => ({ runStartupMigrations: jest.fn() }));
 jest.mock('@/models', () => ({
   connectDB: jest.fn().mockResolvedValue(undefined),
-  connectDBWithRetry: jest.fn().mockResolvedValue(undefined),
+}));
+jest.mock('@/datastore', () => ({
+  getDatastore: jest.fn(() => ({
+    backend: 'mongo',
+    connectWithRetry: jest.fn().mockResolvedValue(undefined),
+    disconnect: jest.fn().mockResolvedValue(undefined),
+  })),
 }));
 jest.mock('@/opamp/app', () => ({ __esModule: true, default: jest.fn() }));
 jest.mock('@/setupDefaults', () => ({ setupTeamDefaults: jest.fn() }));

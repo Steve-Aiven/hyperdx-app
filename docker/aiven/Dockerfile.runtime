@@ -1,0 +1,81 @@
+# Aiven Runtime image: HyperDX prod (no embedded Mongo/CH) + Aiven entrypoint.
+# Build from monorepo root:
+#   docker build -f docker/aiven/Dockerfile.runtime -t hyperdx-aiven .
+
+ARG NODE_VERSION=22.23.4
+ARG CODE_VERSION=dev
+
+# --- replicate node_base / builder / prod from docker/hyperdx/Dockerfile ---
+# Keep this file self-contained so Aiven Runtime can build with a single
+# Dockerfile path without BuildKit additional contexts.
+
+FROM node:${NODE_VERSION}-alpine AS node_base
+WORKDIR /app
+COPY .yarn ./.yarn
+COPY .yarnrc.yml yarn.lock package.json nx.json .prettierrc .prettierignore ./tsconfig.base.json ./
+COPY ./packages/common-utils/package.json ./packages/common-utils/package.json
+COPY ./packages/api/jest.config.js ./packages/api/tsconfig.json ./packages/api/tsconfig.build.json ./packages/api/package.json ./packages/api/
+COPY ./packages/app/jest.config.js ./packages/app/tsconfig.json ./packages/app/tsconfig.build.json ./packages/app/package.json ./packages/app/next.config.mjs ./packages/app/mdx.d.ts ./packages/app/css.d.ts ./packages/app/eslint.config.mjs ./packages/app/
+RUN apk add --no-cache libc6-compat
+RUN --mount=type=cache,target=/root/.yarn/berry/cache,id=yarn-cache \
+    yarn install --mode=skip-build && yarn cache clean
+
+FROM node_base AS common-utils-builder
+COPY ./packages/common-utils ./packages/common-utils
+RUN yarn workspace @hyperdx/common-utils run build
+
+FROM node_base AS builder
+WORKDIR /app
+COPY --from=common-utils-builder /app/packages/common-utils ./packages/common-utils
+COPY ./packages/api/src ./packages/api/src
+COPY ./packages/api/bin ./packages/api/bin
+COPY ./packages/app/src ./packages/app/src
+COPY ./packages/app/pages ./packages/app/pages
+COPY ./packages/app/public ./packages/app/public
+COPY ./packages/app/styles ./packages/app/styles
+COPY ./packages/app/types ./packages/app/types
+COPY ./CHANGELOG.md ./CHANGELOG.md
+COPY ./packages/app/scripts ./packages/app/scripts
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_OUTPUT_STANDALONE=true
+ENV NEXT_PUBLIC_IS_LOCAL_MODE=false
+RUN yarn workspace @hyperdx/api run build && \
+    yarn workspace @hyperdx/app run build
+RUN --mount=type=cache,target=/root/.yarn/berry/cache,id=yarn-cache \
+    rm -rf node_modules && yarn workspaces focus @hyperdx/api --production
+
+FROM node:${NODE_VERSION}-alpine AS aiven
+ARG CODE_VERSION
+ENV CODE_VERSION=$CODE_VERSION
+ENV OTEL_RESOURCE_ATTRIBUTES="service.version=$CODE_VERSION"
+ENV NODE_ENV=production
+ENV DATASTORE=postgres
+ENV HYPERDX_IMAGE=hyperdx
+
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+    /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
+USER node
+WORKDIR /app
+COPY --chown=node:node --from=builder /app/node_modules ./node_modules
+COPY --chown=node:node --from=builder /app/packages/api/build ./packages/api/build
+COPY --chown=node:node --from=builder /app/packages/api/bin ./packages/api/bin
+COPY --chown=node:node --from=builder /app/packages/common-utils/dist ./packages/common-utils/dist
+COPY --chown=node:node --from=node_base /app/packages/common-utils/node_modules ./packages/common-utils/node_modules
+COPY --chown=node:node --from=builder /app/packages/app/.next/standalone ./packages/app
+COPY --chown=node:node --from=builder /app/packages/app/.next/static ./packages/app/packages/app/.next/static
+COPY --chown=node:node --from=builder /app/packages/app/public ./packages/app/packages/app/public
+COPY --chown=node:node ./docker/hyperdx/refresh-env.js /etc/local/refresh-env.js
+COPY --chown=node:node ./docker/hyperdx/entry.prod.sh /etc/local/entry.prod.sh
+COPY --chown=node:node ./docker/aiven/entrypoint.sh /aiven-entrypoint.sh
+
+USER root
+RUN chmod +x /aiven-entrypoint.sh /etc/local/entry.prod.sh
+USER node
+
+EXPOSE 8080 8000 4318
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:8000/health',r=>r.statusCode===200?process.exit(0):process.exit(1)).on('error',()=>process.exit(1))"
+
+ENTRYPOINT ["/aiven-entrypoint.sh"]

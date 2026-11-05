@@ -6,6 +6,7 @@ import {
   getTeamInviteUrl,
 } from '@/controllers/team';
 import { clearDBCollections, closeDB, connectDB } from '@/fixtures';
+import Team from '@/models/team';
 
 describe('getTeamInviteUrl', () => {
   it('builds the join-team URL for a token', () => {
@@ -33,9 +34,7 @@ describe('team controller', () => {
 
     expect(team.name).toBe('My Team');
 
-    team.apiKey = 'apiKey';
-
-    await team.save();
+    await Team.updateOne({ _id: team._id }, { apiKey: 'apiKey' });
 
     expect(await getTeam(team._id)).toBeTruthy();
     expect(await getTeamByApiKey('apiKey')).toBeTruthy();

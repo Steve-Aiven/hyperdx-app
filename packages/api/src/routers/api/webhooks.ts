@@ -7,15 +7,16 @@ import type {
 } from '@hyperdx/common-utils/dist/types';
 import { AlertThresholdType } from '@hyperdx/common-utils/dist/types';
 import express from 'express';
-import { ObjectId } from 'mongodb';
 import mongoose from 'mongoose';
 import ms from 'ms';
 import { z } from 'zod';
 import { validateRequest } from 'zod-express-middleware';
 
 import { createWebhook, deleteWebhook } from '@/controllers/webhook';
+import { getDatastore } from '@/datastore';
+import type { WebhookRecord } from '@/datastore/types';
 import { AlertSource, AlertState } from '@/models/alert';
-import Webhook, { WebhookService } from '@/models/webhook';
+import { WebhookService } from '@/models/webhook';
 import {
   ALERT_STATUS_BY_STATE,
   ALERT_TYPE_BY_SOURCE,
@@ -82,12 +83,13 @@ type WebhookPlain = Pick<
   'url' | 'headers' | 'queryParams' | 'service'
 >;
 
-const toWebhookPlain = (doc: mongoose.Document): WebhookPlain =>
-  doc.toJSON({ flattenMaps: true }) as WebhookPlain;
+const toWebhookPlain = (webhook: WebhookRecord): WebhookPlain => webhook;
 
-const serializeWebhook = (doc: mongoose.Document): WebhookApiData => {
-  const { team: _team, __v, ...data } = doc.toJSON({ flattenMaps: true });
-  return data as WebhookApiData;
+const serializeWebhook = (webhook: WebhookRecord): WebhookApiData => {
+  const { team: _team, ...data } = webhook;
+  // Dates become ISO strings in the JSON response, which WebhookApiData models.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  return data as unknown as WebhookApiData;
 };
 
 const mergeRedactedMap = (
@@ -148,10 +150,10 @@ router.get(
         return res.sendStatus(403);
       }
       const { service } = req.query;
-      const webhooks = await Webhook.find(
-        { team: teamId, service },
-        { __v: 0, team: 0 },
-      );
+      const services = Array.isArray(service) ? service : [service];
+      const webhooks = (
+        await getDatastore().webhooks.listByTeam(teamId.toString())
+      ).filter(w => services.includes(w.service));
       res.json({
         data: webhooks.map(w => sanitizeWebhook(serializeWebhook(w))),
       });
@@ -202,7 +204,13 @@ router.post(
       // The unique index is on (team, service, name), so the pre-flight check
       // must query the same fields — otherwise a name+service collision slips
       // past this guard and surfaces as an uncaught duplicate-key 500 below.
-      if (await Webhook.findOne({ team: teamId, service, name })) {
+      if (
+        await getDatastore().webhooks.findByName(
+          teamId.toString(),
+          service,
+          name,
+        )
+      ) {
         return res.status(400).json({
           message: 'Webhook already exists',
         });
@@ -277,10 +285,10 @@ router.put(
       } = req.body;
       const { id } = req.params;
 
-      const existingWebhook = await Webhook.findOne({
-        _id: id,
-        team: teamId,
-      });
+      const existingWebhook = await getDatastore().webhooks.getById(
+        teamId.toString(),
+        id,
+      );
       if (!existingWebhook) {
         return res.status(404).json({
           message: 'Webhook not found',
@@ -323,52 +331,34 @@ router.put(
 
       // Match the unique index (team, service, name) so a rename onto an
       // existing (service, name) is caught here rather than as a 500 below.
-      const duplicateWebhook = await Webhook.findOne({
-        team: teamId,
+      const duplicateWebhook = await getDatastore().webhooks.findByName(
+        teamId.toString(),
         service,
         name,
-        _id: { $ne: id },
-      });
-      if (duplicateWebhook) {
+      );
+      if (duplicateWebhook && duplicateWebhook._id !== id) {
         return res.status(400).json({
           message: 'A webhook with this service and name already exists',
         });
       }
 
-      // $unset is required for Mongoose Map fields — $set with undefined
-      // does not remove a Map field from the document.
-      const $set: Record<string, unknown> = {
-        name,
-        service,
-        url: resolvedUrl,
-        description,
-        titleEmoji,
-        body,
-      };
-      const $unset: Record<string, 1> = {};
-
-      if (resolvedHeaders !== undefined) {
-        $set.headers = resolvedHeaders;
-      } else {
-        $unset.headers = 1;
-      }
-      if (resolvedQueryParams !== undefined) {
-        $set.queryParams = resolvedQueryParams;
-      } else {
-        $unset.queryParams = 1;
-      }
-
-      const updateOp: Record<string, unknown> = { $set };
-      if (Object.keys($unset).length > 0) {
-        updateOp.$unset = $unset;
-      }
-
       // Condition on stored URL so a concurrent PUT that changes the
       // destination between read and write is detected (TOCTOU guard).
-      const updatedWebhook = await Webhook.findOneAndUpdate(
-        { _id: id, team: teamId, url: existingPlain.url },
-        updateOp,
-        { new: true, select: { __v: 0, team: 0 } },
+      // Undefined headers/queryParams clear the stored value.
+      const updatedWebhook = await getDatastore().webhooks.replace(
+        teamId.toString(),
+        id,
+        {
+          name,
+          service,
+          url: resolvedUrl,
+          description,
+          titleEmoji,
+          body,
+          headers: resolvedHeaders,
+          queryParams: resolvedQueryParams,
+        },
+        { url: existingPlain.url, service: existingPlain.service },
       );
 
       if (!updatedWebhook) {
@@ -457,10 +447,10 @@ router.post(
       // only when the submitted URL still points at the stored destination.
       // This prevents exfiltrating stored secrets to an attacker-controlled URL.
       if (webhookId) {
-        const existing = await Webhook.findOne({
-          _id: webhookId,
-          team: teamId,
-        });
+        const existing = await getDatastore().webhooks.getById(
+          teamId.toString(),
+          webhookId,
+        );
         if (!existing) {
           return res.status(404).json({ message: 'Webhook not found' });
         }
@@ -477,15 +467,20 @@ router.post(
 
       validateWebhookConfig({ service, url, body });
 
-      // Create a temporary webhook object for testing
-      const testWebhook = new Webhook({
-        team: new ObjectId(teamId),
+      // A throwaway target for the test send; nothing is persisted.
+      const testWebhook: WebhookRecord = {
+        _id: '',
+        id: '',
+        team: teamId.toString(),
+        name: 'test',
         service,
         url,
         queryParams,
         headers,
         body,
-      });
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
 
       // Every field a real firing sends, so a body written against the
       // documented variables renders here exactly as it will in production.

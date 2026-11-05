@@ -1,7 +1,8 @@
-import Favorite, { IFavorite } from '@/models/favorite';
+import { getDatastore } from '@/datastore';
+import type { IFavorite } from '@/models/favorite';
 
 export function getFavorites(userId: string, teamId: string) {
-  return Favorite.find({ user: userId, team: teamId });
+  return getDatastore().favorites.list(userId, teamId);
 }
 
 export function addFavorite(
@@ -10,10 +11,11 @@ export function addFavorite(
   resourceType: IFavorite['resourceType'],
   resourceId: string,
 ) {
-  return Favorite.findOneAndUpdate(
-    { user: userId, team: teamId, resourceType, resourceId },
-    { user: userId, team: teamId, resourceType, resourceId },
-    { upsert: true, new: true },
+  return getDatastore().favorites.upsert(
+    userId,
+    teamId,
+    resourceType,
+    resourceId,
   );
 }
 
@@ -23,10 +25,10 @@ export function removeFavorite(
   resourceType: IFavorite['resourceType'],
   resourceId: string,
 ) {
-  return Favorite.deleteOne({
-    user: userId,
-    team: teamId,
+  return getDatastore().favorites.remove(
+    userId,
+    teamId,
     resourceType,
     resourceId,
-  });
+  );
 }

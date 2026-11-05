@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
+import { getDatastore } from '@/datastore';
 import { READ_ONLY_TOOL } from '@/mcp/tools/annotations';
 import type { ToolRegistrar } from '@/mcp/tools/types';
-import Webhook from '@/models/webhook';
 
 export function registerGetWebhook({
   context,
@@ -22,10 +22,10 @@ export function registerGetWebhook({
       inputSchema: z.object({}),
     },
     async () => {
-      const webhooks = await Webhook.find({ team: teamId });
+      const webhooks = await getDatastore().webhooks.listByTeam(teamId);
 
       const output = webhooks.map(wh => ({
-        id: wh._id.toString(),
+        id: wh._id,
         name: wh.name,
         service: wh.service,
       }));

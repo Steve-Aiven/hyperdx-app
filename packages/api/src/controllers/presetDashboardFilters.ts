@@ -2,50 +2,40 @@ import {
   PresetDashboard,
   PresetDashboardFilter,
 } from '@hyperdx/common-utils/dist/types';
-import mongoose from 'mongoose';
 
-import { ObjectId } from '@/models';
-import PresetDashboardFilterModel from '@/models/presetDashboardFilter';
+import { getDatastore } from '@/datastore';
+import type { ObjectId } from '@/models';
 
 export async function getPresetDashboardFilters(
   teamId: string | ObjectId,
   source: string | ObjectId,
   presetDashboard: PresetDashboard,
 ) {
-  return await PresetDashboardFilterModel.find({
-    team: new mongoose.Types.ObjectId(teamId),
-    source: new mongoose.Types.ObjectId(source),
+  return getDatastore().presetDashboardFilters.list(
+    teamId.toString(),
+    source.toString(),
     presetDashboard,
-  });
+  );
 }
 
 export const createPresetDashboardFilter = async (
   teamId: string | ObjectId,
   presetDashboardFilter: PresetDashboardFilter,
 ) => {
-  const newPresetDashboardFilter = new PresetDashboardFilterModel({
-    ...presetDashboardFilter,
-    team: new mongoose.Types.ObjectId(teamId),
-  });
-
-  return newPresetDashboardFilter.save();
+  return getDatastore().presetDashboardFilters.create(
+    teamId.toString(),
+    presetDashboardFilter,
+  );
 };
 
 export const updatePresetDashboardFilter = async (
   teamId: string | ObjectId,
   presetDashboardFilter: PresetDashboardFilter,
 ) => {
-  return await PresetDashboardFilterModel.findOneAndUpdate(
-    {
-      _id: new mongoose.Types.ObjectId(presetDashboardFilter.id),
-      team: new mongoose.Types.ObjectId(teamId),
-    },
-    {
-      ...presetDashboardFilter,
-      _id: new mongoose.Types.ObjectId(presetDashboardFilter.id),
-      team: new mongoose.Types.ObjectId(teamId),
-    },
-    { new: true },
+  return getDatastore().presetDashboardFilters.update(
+    teamId.toString(),
+    presetDashboardFilter.id,
+    presetDashboardFilter,
   );
 };
 
@@ -54,9 +44,9 @@ export const deletePresetDashboardFilter = async (
   presetDashboard: PresetDashboard,
   presetDashboardFilterId: string | ObjectId,
 ) => {
-  return await PresetDashboardFilterModel.findOneAndDelete({
-    _id: new mongoose.Types.ObjectId(presetDashboardFilterId),
-    team: new mongoose.Types.ObjectId(teamId),
+  return getDatastore().presetDashboardFilters.delete(
+    teamId.toString(),
     presetDashboard,
-  });
+    presetDashboardFilterId.toString(),
+  );
 };

@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import * as config from '@/config';
 import { validateConnectionId } from '@/controllers/connection';
 import { createSource, getSource, updateSource } from '@/controllers/sources';
+import type { SourceRecord } from '@/datastore/types';
 import { UPSERT_TOOL } from '@/mcp/tools/annotations';
 import type { ToolRegistrar } from '@/mcp/tools/types';
 import {
@@ -142,7 +143,7 @@ async function validateCorrelatedSourceIds(
 }
 
 function sourceResult(
-  source: { toJSON(opts: { getters: boolean }): unknown } | null | undefined,
+  source: SourceRecord | null | undefined,
   frontendUrl: string | undefined,
 ) {
   return {
@@ -151,7 +152,7 @@ function sourceResult(
         type: 'text' as const,
         text: JSON.stringify(
           {
-            ...(source?.toJSON({ getters: true }) as Record<string, unknown>),
+            ...source,
             ...(frontendUrl ? { url: `${frontendUrl}/team#sources` } : {}),
           },
           null,

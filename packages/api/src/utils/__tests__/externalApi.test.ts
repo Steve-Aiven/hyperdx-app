@@ -1,8 +1,8 @@
 import { Types } from 'mongoose';
 
+import type { AlertWithDisplayRefs } from '@/controllers/alertRefs';
 import {
   type AlertChannel,
-  type AlertDocument,
   AlertSource,
   AlertState,
   AlertThresholdType,
@@ -18,7 +18,7 @@ const foreignChannel = (value: any): AlertChannel => value;
 
 const createAlertDocument = (
   overrides: Partial<Record<string, unknown>> = {},
-): AlertDocument =>
+): AlertWithDisplayRefs =>
   ({
     _id: new Types.ObjectId(),
     team: new Types.ObjectId(),
@@ -29,7 +29,7 @@ const createAlertDocument = (
     state: AlertState.OK,
     channel: { type: null },
     ...overrides,
-  }) as unknown as AlertDocument;
+  }) as unknown as AlertWithDisplayRefs;
 
 describe('utils/externalApi', () => {
   describe('translateAlertDocumentToExternalAlert', () => {

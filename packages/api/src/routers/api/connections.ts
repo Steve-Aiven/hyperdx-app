@@ -19,7 +19,7 @@ router.get('/', async (req, res, next) => {
 
     const connections = await getConnectionsByTeam(teamId.toString());
 
-    res.json(connections.map(c => c.toJSON({ virtuals: true })));
+    res.json(connections);
   } catch (e) {
     next(e);
   }
@@ -47,7 +47,6 @@ router.post(
       const connection = await createConnection(teamId.toString(), {
         ...body,
         password: req.body.password ?? '',
-        team: teamId,
         hyperdxSettingPrefix: req.body.hyperdxSettingPrefix ?? undefined,
       });
 
@@ -88,7 +87,6 @@ router.put(
 
       const newConnection = {
         ...restBody,
-        team: teamId,
         ...(req.body.password
           ? { password: req.body.password }
           : {

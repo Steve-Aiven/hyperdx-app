@@ -7,10 +7,11 @@ import {
   createSavedSearch,
   deleteSavedSearch,
   getSavedSearch,
+  toExternalSavedSearch,
   updateSavedSearch,
 } from '@/controllers/savedSearch';
 import { getSource } from '@/controllers/sources';
-import { SavedSearch } from '@/models/savedSearch';
+import { getDatastore } from '@/datastore';
 import { processRequestWithEnhancedErrors as validateRequest } from '@/utils/enhancedErrors';
 import {
   getPagination,
@@ -379,18 +380,18 @@ router.get(
       }
 
       const { limit, offset } = getPagination(req.query);
-      const filter = { team: teamId.toString() };
-      // Sort by _id so skip/offset paging is stable across requests.
-      const [savedSearches, total] = await Promise.all([
-        SavedSearch.find(filter).sort({ _id: 1 }).skip(offset).limit(limit),
-        SavedSearch.countDocuments(filter),
-      ]);
+      // Sorted by _id so skip/offset paging is stable across requests.
+      const { data: savedSearches, total } =
+        await getDatastore().savedSearches.listPage(teamId.toString(), {
+          offset,
+          limit,
+        });
 
       // Surface the full count at the HTTP layer too, so a client that reads
       // headers but not the `meta` body can still detect truncation.
       res.set('X-Total-Count', String(total));
       return res.json({
-        data: savedSearches.map(s => s.toExternalJSON()),
+        data: savedSearches.map(toExternalSavedSearch),
         meta: paginationMeta({ limit, offset }, total, 'saved-searches'),
       });
     } catch (e) {
@@ -460,7 +461,7 @@ router.get(
         return res.status(404).json({ message: 'Saved search not found' });
       }
 
-      res.json({ data: savedSearch.toExternalJSON() });
+      res.json({ data: toExternalSavedSearch(savedSearch) });
     } catch (e) {
       next(e);
     }
@@ -533,7 +534,7 @@ router.post(
         userId?.toString(),
       );
 
-      res.json({ data: savedSearch.toExternalJSON() });
+      res.json({ data: toExternalSavedSearch(savedSearch) });
     } catch (e) {
       next(e);
     }
@@ -617,13 +618,7 @@ router.put(
       // Grandfather filters that are unchanged from the stored search: a
       // read-modify-write may echo back a legacy non-renderable filter the API
       // itself served on GET. Only new/changed filters must render.
-      // Read only the stored filters for the grandfather check — a lean,
-      // projected query, not the fully-populated getSavedSearch (which also
-      // populates createdBy/updatedBy we don't need here).
-      const existing = await SavedSearch.findOne(
-        { _id: req.params.id, team: teamId.toString() },
-        { filters: 1 },
-      ).lean();
+      const existing = await getSavedSearch(teamId.toString(), req.params.id);
       if (existing == null) {
         return res.status(404).json({ message: 'Saved search not found' });
       }
@@ -648,7 +643,7 @@ router.put(
         return res.status(404).json({ message: 'Saved search not found' });
       }
 
-      res.json({ data: savedSearch.toExternalJSON() });
+      res.json({ data: toExternalSavedSearch(savedSearch) });
     } catch (e) {
       next(e);
     }

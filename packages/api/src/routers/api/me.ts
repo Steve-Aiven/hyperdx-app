@@ -39,7 +39,7 @@ router.get('/', async (req, res: express.Response<MeApiResponse>, next) => {
       team: teamId,
     } = req.user;
 
-    const team = await getTeam(teamId);
+    const team = teamId == null ? null : await getTeam(teamId);
     if (team == null) {
       throw new Api404Error(`Team not found for user ${id}`);
     }

@@ -58,18 +58,22 @@ import { performance } from 'perf_hooks';
 import { serializeError } from 'serialize-error';
 
 import { ALERT_HISTORY_QUERY_CONCURRENCY } from '@/controllers/alertHistory';
-import { AlertState, IAlert, IAlertError } from '@/models/alert';
-import AlertHistory, {
+import { getDatastore } from '@/datastore';
+import type {
+  AlertRecord,
+  DashboardRecord,
+  SavedSearchRecord,
+  SourceRecord,
+  WebhookTarget,
+} from '@/datastore/types';
+import { AlertState, IAlertError } from '@/models/alert';
+import {
   attributesToGroupValues,
   GroupValue,
   groupValuesToAttributes,
   IAlertHistory,
   IAlertHistoryAnalytics,
 } from '@/models/alertHistory';
-import { IDashboard } from '@/models/dashboard';
-import { ISavedSearch } from '@/models/savedSearch';
-import { ISource } from '@/models/source';
-import { IWebhook } from '@/models/webhook';
 import {
   isClientTimeoutOrAbortError,
   isQueryTimeoutError,
@@ -161,8 +165,8 @@ export const alertHasGroupBy = (details: AlertDetails): boolean => {
  * whose own SELECT doesn't include those aliases.
  */
 export async function computeAliasWithClauses(
-  savedSearch: Pick<ISavedSearch, 'select' | 'where' | 'whereLanguage'>,
-  source: ISource,
+  savedSearch: Pick<SavedSearchRecord, 'select' | 'where' | 'whereLanguage'>,
+  source: SourceRecord,
   metadata: Metadata,
 ): Promise<BuilderChartConfigWithOptDateRange['with']> {
   const resolvedSelect =
@@ -323,7 +327,7 @@ export const doesExceedThreshold = (
     threshold,
     thresholdType,
     thresholdMax,
-  }: Pick<IAlert, 'thresholdType' | 'threshold' | 'thresholdMax'>,
+  }: Pick<AlertRecord, 'thresholdType' | 'threshold' | 'thresholdMax'>,
   value: number,
 ) => {
   switch (thresholdType) {
@@ -392,7 +396,7 @@ const normalizeScheduleStartAt = ({
   scheduleStartAt,
 }: {
   alertId: string;
-  scheduleStartAt: IAlert['scheduleStartAt'];
+  scheduleStartAt: AlertRecord['scheduleStartAt'];
 }) => {
   if (scheduleStartAt == null) {
     return undefined;
@@ -442,7 +446,7 @@ export const getScheduledWindowStart = (
  * that history fetched up-front (see getConsecutiveWindowHistories) lines up
  * exactly with the window processAlert evaluates.
  */
-const getAlertWindowStart = (alert: IAlert, now: Date): Date => {
+const getAlertWindowStart = (alert: AlertRecord, now: Date): Date => {
   const windowSizeInMins = ms(alert.interval) / 60000;
   const scheduleStartAt = normalizeScheduleStartAt({
     alertId: alert.id,
@@ -480,22 +484,22 @@ const fireChannelEvent = async ({
   teamWebhooksById,
   sampleLines,
 }: {
-  alert: IAlert;
+  alert: AlertRecord;
   alertProvider: AlertProvider;
   attributes: Record<string, string>; // TODO: support other types than string
   clickhouseClient: ClickhouseClient;
-  dashboard?: IDashboard | null;
+  dashboard?: DashboardRecord | null;
   endTime: Date;
   group?: string;
   isGroupedAlert: boolean;
   metadata: Metadata;
-  savedSearch?: ISavedSearch | null;
-  source?: ISource | null;
+  savedSearch?: SavedSearchRecord | null;
+  source?: SourceRecord | null;
   startTime: Date;
   state: AlertState;
   totalCount: number;
   windowSizeInMins: number;
-  teamWebhooksById: Map<string, IWebhook>;
+  teamWebhooksById: Map<string, WebhookTarget>;
   sampleLines?: () => Promise<string>;
 }): Promise<
   Pick<RenderedAlert, 'failures' | 'timings' | 'dispatchDurationMs'>
@@ -689,7 +693,7 @@ const buildAlertChartConfigFromSavedConfig = ({
   // AlertChartConfig (an inline alert's persisted config) is assignable here:
   // its members are the tile config types minus the embedded alert field.
   savedConfig: SavedChartConfig;
-  source?: ISource;
+  source?: SourceRecord;
   connection: string;
   dateRange: [Date, Date];
   windowSizeInMins: number;
@@ -981,7 +985,7 @@ export const processAlert = async (
   clickhouseClient: ClickhouseClient,
   connectionId: string,
   alertProvider: AlertProvider,
-  teamWebhooksById: Map<string, IWebhook>,
+  teamWebhooksById: Map<string, WebhookTarget>,
 ) => {
   const { alert, previousMap, recentHistoryMap } = details;
   const source = 'source' in details ? details.source : undefined;
@@ -1832,7 +1836,7 @@ export const processAlert = async (
 export { handleSendGenericWebhook };
 
 export interface AggregatedAlertHistory {
-  _id: ObjectId;
+  _id: ObjectId | string;
   createdAt: Date;
   state: AlertState;
   group?: string;
@@ -1860,8 +1864,6 @@ export const getPreviousAlertHistories = async (
   now: Date,
   sharedQueue?: PQueue,
 ) => {
-  const lookbackDate = new Date(now.getTime() - ms('7d'));
-
   // Concurrency-limited per-alert queries to avoid overwhelming the connection
   // pool when there are many alerts (e.g., 200+ alert IDs).
   const queue =
@@ -1870,49 +1872,11 @@ export const getPreviousAlertHistories = async (
   const results = await Promise.all(
     alertIds.map(alertId =>
       queue.add(async () => {
-        const id = new mongoose.Types.ObjectId(alertId);
-        return AlertHistory.aggregate<AggregatedAlertHistory>([
-          {
-            $match: {
-              alert: id,
-              createdAt: { $lte: now, $gte: lookbackDate },
-              // ERROR rows record failed evaluations; they must not count as
-              // "window evaluated" or the failed window would never be
-              // retried/backfilled.
-              state: { $ne: AlertState.ERROR },
-            },
-          },
-          // With a single alert value, the compound index {alert: 1, group: 1, createdAt: -1}
-          // delivers results already in this sort order — this is an index-backed no-op sort.
-          {
-            $sort: { alert: 1, group: 1, createdAt: -1 },
-          },
-          // Group by {alert, group}, taking the first (latest) document's fields.
-          // Using $first on individual fields instead of $first: '$$ROOT' allows
-          // DocumentDB to avoid fetching full documents when not needed.
-          {
-            $group: {
-              _id: {
-                alert: '$alert',
-                group: '$group',
-              },
-              createdAt: { $first: '$createdAt' },
-              state: { $first: '$state' },
-              fired: { $first: '$fired' },
-              groupValues: { $first: '$groupValues' },
-            },
-          },
-          {
-            $project: {
-              _id: '$_id.alert',
-              createdAt: 1,
-              state: 1,
-              group: '$_id.group',
-              fired: 1,
-              groupValues: 1,
-            },
-          },
-        ]);
+        return getDatastore().alertHistories.getPrevious(
+          alertId,
+          now,
+          ms('7d'),
+        );
       }),
     ),
   );
@@ -1947,7 +1911,7 @@ export const getPreviousAlertHistories = async (
  * evaluates for the same `now`.
  */
 export const getConsecutiveWindowHistories = async (
-  alerts: IAlert[],
+  alerts: AlertRecord[],
   now: Date,
   sharedQueue?: PQueue,
 ): Promise<Map<string, AggregatedAlertHistory[]>> => {
@@ -1974,28 +1938,12 @@ export const getConsecutiveWindowHistories = async (
           windowStart.getTime() -
             (numWindowsToLookBack - 1) * windowSizeInMins * 60_000,
         );
-        const id = new mongoose.Types.ObjectId(alert.id);
-        const histories = await AlertHistory.aggregate<AggregatedAlertHistory>([
-          {
-            $match: {
-              alert: id,
-              createdAt: { $gte: earliestAllowedTime, $lt: windowStart },
-              // Failed evaluations (ERROR rows) are not evaluated windows and
-              // must not affect consecutive-window counting.
-              state: { $ne: AlertState.ERROR },
-            },
-          },
-          { $sort: { alert: 1, group: 1, createdAt: -1 } },
-          {
-            $project: {
-              _id: '$alert',
-              createdAt: 1,
-              state: 1,
-              group: 1,
-              fired: 1,
-            },
-          },
-        ]);
+        const histories =
+          await getDatastore().alertHistories.getConsecutiveWindow(
+            alert.id,
+            earliestAllowedTime,
+            windowStart,
+          );
         return { alertId: alert.id, histories };
       }),
     ),
@@ -2038,7 +1986,7 @@ export default class CheckAlertTask implements HdxTask {
    */
   async processAlertTask(
     alertTask: AlertTask,
-    teamWebhooksById: Map<string, IWebhook>,
+    teamWebhooksById: Map<string, WebhookTarget>,
   ): Promise<boolean> {
     return tasksTracer.startActiveSpan('processAlertTask', async span => {
       setBusinessContext({ teamId: alertTask.conn.team.toString() });
@@ -2148,7 +2096,7 @@ export default class CheckAlertTask implements HdxTask {
     );
 
     const teams = new Set(alertTasks.map(t => t.conn.team.toString()));
-    const teamToWebhooks = new Map<string, Map<string, IWebhook>>();
+    const teamToWebhooks = new Map<string, Map<string, WebhookTarget>>();
     for (const teamId of teams) {
       const teamWebhooksById = await this.provider.getWebhooks(teamId);
       teamToWebhooks.set(teamId, teamWebhooksById);

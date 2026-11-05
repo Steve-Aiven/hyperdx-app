@@ -681,7 +681,7 @@ router.get(
       const { limit, offset, ...filterParams } = listAlertsQuerySchema.parse(
         req.query ?? {},
       );
-      const filter = buildAlertsFilter(teamId, filterParams);
+      const filter = buildAlertsFilter(filterParams);
       const [alerts, total] = await Promise.all([
         getAlertsWithDisplayRefs(teamId, { limit, offset }, filter),
         countAlerts(teamId, filter),

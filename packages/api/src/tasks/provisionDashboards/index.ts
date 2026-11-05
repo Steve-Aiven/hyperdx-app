@@ -8,9 +8,7 @@ import {
 import fs from 'fs';
 import path from 'path';
 
-import { connectDB, mongooseConnection } from '@/models';
-import Dashboard from '@/models/dashboard';
-import Team from '@/models/team';
+import { getDatastore } from '@/datastore';
 import type { HdxTask } from '@/tasks/types';
 import { ProvisionDashboardsTaskArgs } from '@/tasks/types';
 import logger from '@/utils/logger';
@@ -72,44 +70,50 @@ export async function syncDashboards(teamId: string, dir: string) {
   const dashboards = readDashboardFiles(dir);
   if (dashboards.length === 0) return;
 
+  const { dashboards: repo } = getDatastore();
+  const existing = await repo.listByTeam(teamId);
+  const provisionedByName = new Map(
+    existing.filter(d => d.provisioned).map(d => [d.name, d.id]),
+  );
+  const userNames = new Set(
+    existing.filter(d => !d.provisioned).map(d => d.name),
+  );
+
   for (const dashboard of dashboards) {
     try {
-      const userDashboard = await Dashboard.exists({
-        name: dashboard.name,
-        team: teamId,
-        provisioned: { $ne: true },
-      });
-      if (userDashboard) {
+      if (userNames.has(dashboard.name)) {
         logger.warn(
           { name: dashboard.name },
           'A user-created dashboard with this name already exists, provisioned copy will coexist',
         );
       }
 
-      const result = await Dashboard.findOneAndUpdate(
-        { name: dashboard.name, team: teamId, provisioned: true },
-        {
-          $set: {
-            tiles: dashboard.tiles || [],
-            tags: dashboard.tags || [],
-            filters: dashboard.filters || [],
-            savedQuery: dashboard.savedQuery ?? null,
-            savedQueryLanguage: dashboard.savedQueryLanguage ?? null,
-            savedFilterValues: dashboard.savedFilterValues || [],
-            containers: dashboard.containers || [],
-          },
-          $setOnInsert: {
-            name: dashboard.name,
-            team: teamId,
-            provisioned: true,
-          },
-        },
-        { upsert: true, new: false },
-      );
+      const content = {
+        tiles: dashboard.tiles || [],
+        tags: dashboard.tags || [],
+        filters: dashboard.filters || [],
+        savedQuery: dashboard.savedQuery ?? null,
+        savedQueryLanguage: dashboard.savedQueryLanguage ?? null,
+        savedFilterValues: dashboard.savedFilterValues || [],
+        containers: dashboard.containers || [],
+      };
 
-      if (result === null) {
-        logger.info({ name: dashboard.name }, 'Created provisioned dashboard');
+      const existingId = provisionedByName.get(dashboard.name);
+      if (existingId != null) {
+        await repo.update(teamId, existingId, {
+          name: dashboard.name,
+          ...content,
+        });
+        continue;
       }
+
+      const created = await repo.create(teamId, {
+        name: dashboard.name,
+        provisioned: true,
+        ...content,
+      });
+      provisionedByName.set(dashboard.name, created.id);
+      logger.info({ name: dashboard.name }, 'Created provisioned dashboard');
     } catch (err) {
       logger.error(
         { err, name: dashboard.name },
@@ -127,7 +131,7 @@ export default class ProvisionDashboardsTask implements HdxTask {
   }
 
   async execute(): Promise<void> {
-    await connectDB();
+    await getDatastore().connect();
 
     const dir = process.env.DASHBOARD_PROVISIONER_DIR;
     if (!dir) {
@@ -165,8 +169,8 @@ export default class ProvisionDashboardsTask implements HdxTask {
 
     let teamIds: string[];
     if (teamId) {
-      const teamExists = await Team.exists({ _id: teamId });
-      if (!teamExists) {
+      const team = await getDatastore().teams.getById(teamId);
+      if (!team) {
         logger.warn(
           { teamId },
           'Configured team does not exist, skipping sync',
@@ -175,8 +179,8 @@ export default class ProvisionDashboardsTask implements HdxTask {
       }
       teamIds = [teamId];
     } else {
-      const teams = await Team.find().select('_id').lean();
-      teamIds = teams.map(t => t._id.toString());
+      const teams = await getDatastore().teams.getAll();
+      teamIds = teams.map(t => t._id);
     }
 
     for (const id of teamIds) {
@@ -185,6 +189,6 @@ export default class ProvisionDashboardsTask implements HdxTask {
   }
 
   async asyncDispose(): Promise<void> {
-    await mongooseConnection.close();
+    await getDatastore().disconnect();
   }
 }

@@ -2,9 +2,9 @@ import { ClickhouseClient } from '@hyperdx/common-utils/dist/clickhouse/node';
 import mongoose from 'mongoose';
 
 import * as config from '@/config';
+import type { AlertRecord, SourceRecord } from '@/datastore/types';
 import { ObjectId } from '@/models';
-import { AlertSource, AlertThresholdType, IAlert } from '@/models/alert';
-import { ISource } from '@/models/source';
+import { AlertSource, AlertThresholdType } from '@/models/alert';
 import { IWebhook } from '@/models/webhook';
 import * as checkAlerts from '@/tasks/checkAlerts';
 import CheckAlertTask from '@/tasks/checkAlerts';
@@ -113,13 +113,13 @@ describe('CheckAlertTask', () => {
         thresholdType: AlertThresholdType.ABOVE,
         interval: '5m',
         channel: { type: 'webhook', webhookId: 'webhook-123' },
-      } as IAlert;
+      } as unknown as AlertRecord;
 
       const mockSource = {
         id: 'source-123',
         from: { databaseName: 'default', tableName: 'otel_logs' },
         timestampValueExpression: 'Timestamp',
-      } as ISource;
+      } as unknown as SourceRecord;
 
       const mockAlertTask = {
         alerts: [
@@ -128,16 +128,18 @@ describe('CheckAlertTask', () => {
             source: mockSource,
             taskType: AlertTaskType.SAVED_SEARCH,
             previousMap: new Map(),
-          } as AlertDetails,
+          } as unknown as AlertDetails,
         ],
         conn: {
           id: 'conn-123',
-          _id: new mongoose.Types.ObjectId(),
+          _id: 'conn-123',
           host: config.CLICKHOUSE_HOST,
           username: config.CLICKHOUSE_USER,
           password: config.CLICKHOUSE_PASSWORD,
           name: '',
-          team: new mongoose.Types.ObjectId(),
+          team: 'team-123',
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
         now: new Date(),
       };
@@ -189,7 +191,7 @@ describe('CheckAlertTask', () => {
         thresholdType: AlertThresholdType.ABOVE,
         interval: '5m',
         channel: { type: 'webhook', webhookId: 'webhook-team1' },
-      } as IAlert;
+      } as unknown as AlertRecord;
 
       const mockAlert2 = {
         id: 'alert-456',
@@ -199,13 +201,13 @@ describe('CheckAlertTask', () => {
         thresholdType: AlertThresholdType.BELOW,
         interval: '1m',
         channel: { type: 'webhook', webhookId: 'webhook-team2' },
-      } as IAlert;
+      } as unknown as AlertRecord;
 
       const mockSource = {
         id: 'source-123',
         from: { databaseName: 'default', tableName: 'otel_logs' },
         timestampValueExpression: 'Timestamp',
-      } as ISource;
+      } as unknown as SourceRecord;
 
       const mockAlertTask1 = {
         alerts: [
@@ -214,16 +216,18 @@ describe('CheckAlertTask', () => {
             source: mockSource,
             taskType: AlertTaskType.SAVED_SEARCH,
             previousMap: new Map(),
-          } as AlertDetails,
+          } as unknown as AlertDetails,
         ],
         conn: {
           id: 'conn-123',
-          _id: new mongoose.Types.ObjectId(),
+          _id: 'conn-123',
           host: config.CLICKHOUSE_HOST,
           username: config.CLICKHOUSE_USER,
           password: config.CLICKHOUSE_PASSWORD,
           name: 'Team1 Connection',
-          team: team1Id,
+          team: team1Id.toString(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
         now: new Date(),
       };
@@ -235,16 +239,18 @@ describe('CheckAlertTask', () => {
             source: mockSource,
             taskType: AlertTaskType.SAVED_SEARCH,
             previousMap: new Map(),
-          } as AlertDetails,
+          } as unknown as AlertDetails,
         ],
         conn: {
           id: 'conn-456',
-          _id: new mongoose.Types.ObjectId(),
+          _id: 'conn-123',
           host: config.CLICKHOUSE_HOST,
           username: config.CLICKHOUSE_USER,
           password: config.CLICKHOUSE_PASSWORD,
           name: 'Team2 Connection',
-          team: team2Id,
+          team: team2Id.toString(),
+          createdAt: new Date(),
+          updatedAt: new Date(),
         },
         now: new Date(),
       };
@@ -366,7 +372,7 @@ describe('CheckAlertTask', () => {
           ],
           conn: {
             id: connId,
-            _id: new mongoose.Types.ObjectId(),
+            _id: 'conn-123',
             host: config.CLICKHOUSE_HOST,
             username: config.CLICKHOUSE_USER,
             password: config.CLICKHOUSE_PASSWORD,

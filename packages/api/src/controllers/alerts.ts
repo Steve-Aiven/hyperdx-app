@@ -1,36 +1,36 @@
-import {
-  displayTypeSupportsBuilderAlerts,
-  displayTypeSupportsRawSqlAlerts,
-  isFormulaSourceKind,
-  savedChartConfigSupportsAlerts,
-  validateRawSqlForAlert,
-} from '@hyperdx/common-utils/dist/core/utils';
-import {
-  isPromqlSavedChartConfig,
-  isRawSqlSavedChartConfig,
-} from '@hyperdx/common-utils/dist/guards';
 import { isRangeThresholdType } from '@hyperdx/common-utils/dist/types';
-import { groupBy } from 'lodash';
-import { type FilterQuery, Types } from 'mongoose';
 import { z } from 'zod';
 
+import {
+  type AlertWithDisplayRefs,
+  type AlertWithRefs,
+  populateCreators,
+  populateDisplayRefs,
+  populatePageRefs,
+} from '@/controllers/alertRefs';
 import { recordOnboardingTaskCompletion } from '@/controllers/user';
+import { getDatastore } from '@/datastore';
+import type {
+  AlertFilter,
+  AlertInput as AlertRepoInput,
+  AlertRecord,
+} from '@/datastore/types';
 import type { ObjectId } from '@/models';
-import Alert, {
+import {
   AlertChannel,
   AlertSource,
   getAlertChannels,
   IAlert,
 } from '@/models/alert';
-import Connection from '@/models/connection';
-import Dashboard, { IDashboard } from '@/models/dashboard';
-import { ISavedSearch, SavedSearch } from '@/models/savedSearch';
-import { Source } from '@/models/source';
-import { IUser } from '@/models/user';
-import Webhook from '@/models/webhook';
+import type { IDashboard } from '@/models/dashboard';
 import { type AlertRefs, deriveAlertDisplayFields } from '@/utils/alerts';
-import { Api400Error } from '@/utils/errors';
-import { internalAlertSchema, objectIdSchema } from '@/utils/zod';
+import { internalAlertSchema } from '@/utils/zod';
+
+export type {
+  AlertWithDisplayRefs,
+  AlertWithRefs,
+} from '@/controllers/alertRefs';
+export { validateAlertInput } from '@/controllers/alertValidation';
 
 export type AlertInput = Omit<
   IAlert,
@@ -43,8 +43,11 @@ export type AlertInput = Omit<
   | 'updatedAt'
   | 'team'
   | 'state'
+  | 'silenced'
 > & {
   id?: string;
+  // Records carry the silencing user as a string id.
+  silenced?: { by?: ObjectId | string; at: Date; until: Date };
   // Exactly one of channel/channels is provided (enforced by alertSchema);
   // `channels` flows in optionally via IAlert.
   channel?: AlertChannel;
@@ -55,205 +58,13 @@ export type AlertInput = Omit<
   dashboardId?: string;
 };
 
-const validateObjectId = (id: string | undefined, message: string) => {
-  if (objectIdSchema.safeParse(id).success === false) {
-    throw new Api400Error(message);
-  }
-};
-
-export const validateAlertInput = async (
-  teamId: ObjectId,
-  alertInput: Pick<
-    AlertInput,
-    | 'source'
-    | 'dashboardId'
-    | 'tileId'
-    | 'savedSearchId'
-    | 'chartConfig'
-    | 'channel'
-    | 'channels'
-  >,
-) => {
-  const refs: AlertRefs = {};
-
-  if (alertInput.source === AlertSource.TILE) {
-    validateObjectId(alertInput.dashboardId, 'Invalid dashboard ID');
-
-    const dashboard = await Dashboard.findOne({
-      _id: alertInput.dashboardId,
-      team: teamId,
-    });
-
-    if (dashboard == null) {
-      throw new Api400Error('Dashboard not found');
-    }
-    refs.dashboard = dashboard;
-
-    const tile = dashboard.tiles.find(tile => tile.id === alertInput.tileId);
-
-    if (tile == null) {
-      throw new Api400Error('Tile not found');
-    }
-
-    // The alert checker cannot evaluate these tiles, so the alert would never run.
-    if (tile.config != null && !savedChartConfigSupportsAlerts(tile.config)) {
-      if (isPromqlSavedChartConfig(tile.config)) {
-        throw new Api400Error('Alerts are not supported on PromQL tiles');
-      }
-      const tileKind = isRawSqlSavedChartConfig(tile.config)
-        ? 'Raw SQL tiles'
-        : 'dashboard tiles';
-      throw new Api400Error(
-        `Alerts on ${tileKind} are only supported for Line, Stacked Bar, or Number display types`,
-      );
-    }
-
-    if (tile.config != null && isRawSqlSavedChartConfig(tile.config)) {
-      const { errors } = validateRawSqlForAlert(tile.config);
-      if (errors.length > 0) {
-        throw new Api400Error(
-          `Raw SQL alert query is invalid: ${errors.join(', ')}`,
-        );
-      }
-    }
-  }
-
-  if (alertInput.source === AlertSource.SAVED_SEARCH) {
-    validateObjectId(alertInput.savedSearchId, 'Invalid saved search ID');
-
-    const savedSearch = await SavedSearch.findOne({
-      _id: alertInput.savedSearchId,
-      team: teamId,
-    });
-
-    if (savedSearch == null) {
-      throw new Api400Error('Saved search not found');
-    }
-    refs.savedSearch = savedSearch;
-  }
-
-  if (alertInput.source === AlertSource.INLINE) {
-    const chartConfig = alertInput.chartConfig;
-    if (chartConfig == null) {
-      throw new Api400Error('Chart config is required');
-    }
-
-    if (isRawSqlSavedChartConfig(chartConfig)) {
-      if (!displayTypeSupportsRawSqlAlerts(chartConfig.displayType)) {
-        throw new Api400Error(
-          'Alerts on Raw SQL charts are only supported for Line, Stacked Bar, or Number display types',
-        );
-      }
-
-      const { errors } = validateRawSqlForAlert(chartConfig);
-      if (errors.length > 0) {
-        throw new Api400Error(
-          `Raw SQL alert query is invalid: ${errors.join(', ')}`,
-        );
-      }
-
-      // Raw SQL configs carry the connection directly; the source reference
-      // is optional metadata for macro expansion ($__sourceTable).
-      validateObjectId(chartConfig.connection, 'Invalid connection ID');
-      const connection = await Connection.findOne({
-        _id: chartConfig.connection,
-        team: teamId,
-      });
-      if (connection == null) {
-        throw new Api400Error('Connection not found');
-      }
-      if (chartConfig.source) {
-        validateObjectId(chartConfig.source, 'Invalid source ID');
-        const source = await Source.findOne({
-          _id: chartConfig.source,
-          team: teamId,
-        });
-        if (source == null) {
-          throw new Api400Error('Source not found');
-        }
-        // The worker executes the query through chartConfig.connection while
-        // expanding $__sourceTable/metricTables from this source. Accepting a
-        // source on a different (even team-owned) connection would query the
-        // wrong database — silently wrong values when the table also exists
-        // there, repeated query failures when it does not.
-        //
-        // Compare as ObjectIds, not strings: objectIdSchema admits every
-        // representation ObjectId.isValid does (uppercase hex, 12-byte
-        // strings), and the Mongo lookups above cast them — a lexical
-        // comparison would reject an equivalent non-canonical ID.
-        if (
-          !new Types.ObjectId(String(source.connection)).equals(
-            chartConfig.connection,
-          )
-        ) {
-          throw new Api400Error(
-            'Source does not belong to the specified connection',
-          );
-        }
-      }
-    } else {
-      // Builder configs: same display types the alert task can evaluate as a
-      // time series (mirrors the tile-alert rules).
-      if (!displayTypeSupportsBuilderAlerts(chartConfig.displayType)) {
-        throw new Api400Error(
-          'Inline chart alerts are only supported for Line, Stacked Bar, or Number display types',
-        );
-      }
-
-      validateObjectId(chartConfig.source, 'Invalid source ID');
-      const source = await Source.findOne({
-        _id: chartConfig.source,
-        team: teamId,
-      });
-      if (source == null) {
-        throw new Api400Error('Source not found');
-      }
-
-      // Same formula source-kind gate as dashboard tiles ("Add Formula" is
-      // disabled in the editor for these kinds), so the API cannot persist a
-      // config the editor refuses.
-      if (
-        'formulas' in chartConfig &&
-        (chartConfig.formulas?.length ?? 0) > 0 &&
-        !isFormulaSourceKind(source.kind)
-      ) {
-        throw new Api400Error(
-          'Alerts with formulas require a Metric, Log, or Trace source',
-        );
-      }
-    }
-  }
-
-  const channels = getAlertChannels(alertInput);
-  if (channels.length === 0) {
-    throw new Api400Error('At least one notification channel is required');
-  }
-
-  const webhookIds = channels
-    .filter(c => c.type === 'webhook')
-    .map(c => c.webhookId);
-  for (const webhookId of webhookIds) {
-    validateObjectId(webhookId, 'Invalid webhook ID');
-  }
-  const uniqueIds = [...new Set(webhookIds)];
-  const found = await Webhook.countDocuments({
-    _id: { $in: uniqueIds },
-    team: teamId,
-  });
-  if (found !== uniqueIds.length) {
-    throw new Api400Error('Webhook not found');
-  }
-
-  return refs;
-};
-
 // Exported for unit testing the channel-mirroring invariant (see
 // controllers/__tests__/alerts.test.ts) -- otherwise only used internally.
 export const makeAlert = (
   alert: AlertInput,
-  userId?: ObjectId,
+  userId?: ObjectId | string,
   refs: AlertRefs = {},
-): Partial<IAlert> => {
+): Partial<AlertRepoInput> => {
   // Preserve existing DB value when scheduleStartAt is omitted from updates
   // (undefined), while still allowing explicit clears via null.
   const hasScheduleStartAt = alert.scheduleStartAt !== undefined;
@@ -302,7 +113,7 @@ export const makeAlert = (
       thresholdMax: alert.thresholdMax,
     }),
     thresholdType: alert.thresholdType,
-    ...(userId && { createdBy: userId }),
+    ...(userId && { createdBy: userId.toString() }),
 
     // Message template
     // Coerce undefined to null so Mongoose clears the field on update.
@@ -315,14 +126,10 @@ export const makeAlert = (
     tags,
 
     // Log alerts
-    savedSearch: isSavedSearch
-      ? ((alert.savedSearchId ?? null) as unknown as ObjectId)
-      : null,
+    savedSearch: isSavedSearch ? (alert.savedSearchId ?? null) : null,
     groupBy: isSavedSearch ? (alert.groupBy ?? null) : null,
     // Tile alerts
-    dashboard: isTile
-      ? ((alert.dashboardId ?? null) as unknown as ObjectId)
-      : null,
+    dashboard: isTile ? (alert.dashboardId ?? null) : null,
     tileId: isTile ? (alert.tileId ?? null) : null,
 
     // Inline alerts
@@ -333,54 +140,49 @@ export const makeAlert = (
   };
 };
 
-// makeAlert omits thresholdMax for a non-range comparator, and Mongoose drops
-// an omitted key from an update rather than clearing the path, so the bound has
-// to be unset explicitly or an alert edited off `between` keeps a stale one and
-// reports a range condition it no longer has. Every update path needs this;
-// $unset is ignored on an upsert insert, so it is safe there too.
-const makeAlertUpdate = (
+// makeAlert omits thresholdMax for a non-range comparator, and a patch drops
+// an omitted key rather than clearing the field, so the bound has to be unset
+// explicitly (undefined) or an alert edited off `between` keeps a stale one and
+// reports a range condition it no longer has. Every update path needs this.
+const makeAlertPatch = (
   alertInput: AlertInput,
-  userId?: ObjectId,
+  userId?: ObjectId | string,
   refs: AlertRefs = {},
-) => ({
-  $set: makeAlert(alertInput, userId, refs),
+): Partial<AlertRepoInput> => ({
+  ...makeAlert(alertInput, userId, refs),
   ...(!isRangeThresholdType(alertInput.thresholdType) && {
-    $unset: { thresholdMax: 1 },
+    thresholdMax: undefined,
   }),
 });
 
+const teamKey = (teamId: ObjectId | string) => String(teamId);
+
 export const createAlert = async (
-  teamId: ObjectId,
+  teamId: ObjectId | string,
   alertInput: z.infer<typeof internalAlertSchema>,
-  userId: ObjectId,
+  userId: ObjectId | string,
   refs: AlertRefs = {},
 ) => {
-  const alert = await new Alert({
-    ...makeAlert(alertInput, userId, refs),
-    team: teamId,
-  }).save();
+  // makeAlert always supplies the required fields; Partial is for patches.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  const input = makeAlert(alertInput, userId, refs) as AlertRepoInput;
+  const alert = await getDatastore().alerts.create(teamKey(teamId), input);
   recordOnboardingTaskCompletion(userId, 'alert');
   return alert;
 };
 
-// create an update alert function based off of the above create alert function
 export const updateAlert = async (
   id: string,
-  teamId: ObjectId,
+  teamId: ObjectId | string,
   alertInput: AlertInput,
   refs: AlertRefs = {},
-  userId?: ObjectId,
+  userId?: ObjectId | string,
 ) => {
   // should consider clearing AlertHistory when updating an alert?
-  const alert = await Alert.findOneAndUpdate(
-    {
-      _id: id,
-      team: teamId,
-    },
-    makeAlertUpdate(alertInput, undefined, refs),
-    {
-      returnDocument: 'after',
-    },
+  const alert = await getDatastore().alerts.update(
+    teamKey(teamId),
+    id,
+    makeAlertPatch(alertInput, undefined, refs),
   );
   // Editing an alert also completes "set up an alert", not just creating one.
   if (alert != null) {
@@ -390,75 +192,81 @@ export const updateAlert = async (
 };
 
 export const countAlerts = async (
-  teamId: ObjectId,
-  filter: FilterQuery<IAlert> = {},
-) => {
-  return Alert.countDocuments({ ...filter, team: teamId });
-};
+  teamId: ObjectId | string,
+  filter: AlertFilter = {},
+) => getDatastore().alerts.count(teamKey(teamId), filter);
 
 export const getAlertById = async (
   alertId: ObjectId | string,
   teamId: ObjectId | string,
-) => {
-  return Alert.findOne({
-    _id: alertId,
-    team: teamId,
-  });
-};
+) => getDatastore().alerts.getById(teamKey(teamId), String(alertId));
 
 export const getTeamDashboardAlertsByDashboardAndTile = async (
-  teamId: ObjectId,
+  teamId: ObjectId | string,
 ) => {
-  const alerts = await Alert.find({
-    source: AlertSource.TILE,
-    team: teamId,
-  }).populate('createdBy', 'email name');
-  return groupBy(alerts, a => `${a.dashboard?.toString()}:${a.tileId}`);
+  const alerts = await populateCreators(
+    await getDatastore().alerts.listTileAlerts(teamKey(teamId)),
+  );
+  const byKey: Record<string, typeof alerts> = {};
+  for (const alert of alerts) {
+    (byKey[`${alert.dashboard}:${alert.tileId}`] ??= []).push(alert);
+  }
+  return byKey;
 };
 
 export const getDashboardAlertsByTile = async (
-  teamId: ObjectId,
+  teamId: ObjectId | string,
   dashboardId: ObjectId | string,
 ) => {
-  const alerts = await Alert.find({
-    dashboard: dashboardId,
-    source: AlertSource.TILE,
-    team: teamId,
-  }).populate('createdBy', 'email name');
-  return groupBy(alerts, 'tileId');
+  const alerts = await populateCreators(
+    await getDatastore().alerts.listTileAlerts(
+      teamKey(teamId),
+      String(dashboardId),
+    ),
+  );
+  const byTile: Record<string, typeof alerts> = {};
+  for (const alert of alerts) {
+    (byTile[String(alert.tileId)] ??= []).push(alert);
+  }
+  return byTile;
 };
 
 export const createOrUpdateDashboardAlerts = async (
-  dashboard: Pick<IDashboard, '_id' | 'name' | 'tags' | 'tiles'>,
-  teamId: ObjectId,
+  dashboard: Pick<IDashboard, 'name' | 'tags' | 'tiles'> & {
+    _id: ObjectId | string;
+  },
+  teamId: ObjectId | string,
   alertsByTile: Record<string, AlertInput>,
-  userId?: ObjectId,
+  userId?: ObjectId | string,
 ) => {
-  const dashboardId = dashboard._id;
+  const dashboardId = String(dashboard._id);
+  const { alerts } = getDatastore();
+  const existing = await alerts.listTileAlerts(teamKey(teamId), dashboardId);
+  const existingByTile = new Map(existing.map(a => [a.tileId, a]));
+
   const result = await Promise.all(
     Object.entries(alertsByTile).map(async ([tileId, alert]) => {
-      const filter = {
-        dashboard: dashboardId,
-        tileId,
-        source: AlertSource.TILE,
-        team: teamId,
-      };
       const alertInput = {
         ...alert,
         source: AlertSource.TILE,
-        dashboardId: dashboardId.toString(),
+        dashboardId,
         tileId,
       };
-      const oldAlert = await Alert.findOne(filter);
-      const alertUpdate =
-        oldAlert && oldAlert.createdBy
-          ? makeAlertUpdate(alertInput, undefined, { dashboard })
-          : makeAlertUpdate(alertInput, userId, { dashboard });
-
-      return await Alert.findOneAndUpdate(filter, alertUpdate, {
-        new: true,
-        upsert: true,
-      });
+      const oldAlert = existingByTile.get(tileId);
+      if (oldAlert == null) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+        const input = makeAlert(alertInput, userId, {
+          dashboard,
+        }) as AlertRepoInput;
+        return alerts.create(teamKey(teamId), input);
+      }
+      // Keep the original creator when there is one.
+      const patch = makeAlertPatch(
+        alertInput,
+        oldAlert.createdBy ? undefined : userId,
+        { dashboard },
+      );
+      return alerts.update(teamKey(teamId), oldAlert._id, patch);
     }),
   );
 
@@ -472,104 +280,64 @@ export const createOrUpdateDashboardAlerts = async (
 
 export const deleteDashboardAlerts = async (
   dashboardId: ObjectId | string,
-  teamId: ObjectId,
+  teamId: ObjectId | string,
   tileIds?: string[],
-) => {
-  return Alert.deleteMany({
-    dashboard: dashboardId,
-    team: teamId,
-    source: AlertSource.TILE,
-    ...(tileIds && { tileId: { $in: tileIds } }),
-  });
-};
+) =>
+  getDatastore().alerts.deleteByDashboard(
+    teamKey(teamId),
+    String(dashboardId),
+    tileIds,
+  );
 
 export const deleteSavedSearchAlerts = async (
   savedSearchId: string,
   teamId: string,
-) => {
-  return Alert.deleteMany({
-    savedSearch: savedSearchId,
-    team: teamId,
-  });
-};
+) => getDatastore().alerts.deleteBySavedSearch(teamId, savedSearchId);
 
-/** Represents the documents populated and projected by getAlert[s]WithDisplayRefs */
-type AlertWithDisplayRefs = {
-  savedSearch: Pick<ISavedSearch, '_id' | 'name' | 'tags'> | null;
-  dashboard: Pick<IDashboard, '_id' | 'name' | 'tags' | 'tiles'> | null;
-};
-
-/** Minimal projections to support deriving alert names from referenced searches and dashboard tiles  */
-const DISPLAY_REF_POPULATE = [
-  { path: 'savedSearch', select: 'name tags' },
-  { path: 'dashboard', select: 'name tags tiles.id tiles.config.name' },
-];
-
-/** Get alerts, with a populated (and projected) search or dashboard reference */
+/** Get alerts, with their saved search or dashboard reference resolved. */
 export const getAlertsWithDisplayRefs = async (
-  teamId: ObjectId,
+  teamId: ObjectId | string,
   { limit, offset }: { limit: number; offset: number },
-  filter: FilterQuery<IAlert> = {},
-) => {
-  return Alert.find({ ...filter, team: teamId })
-    .sort({ _id: 1 })
-    .skip(offset)
-    .limit(limit)
-    .populate<AlertWithDisplayRefs>(DISPLAY_REF_POPULATE);
+  filter: AlertFilter = {},
+): Promise<AlertWithDisplayRefs[]> => {
+  const alerts = await getDatastore().alerts.list(teamKey(teamId), filter, {
+    sort: 'id',
+    limit,
+    offset,
+  });
+  return populateDisplayRefs(teamKey(teamId), alerts);
 };
 
-/** Get alert, with a populated (and projected) search or dashboard reference */
+/** Get alert, with its saved search or dashboard reference resolved. */
 export const getAlertWithDisplayRefs = async (
   alertId: ObjectId | string,
   teamId: ObjectId | string,
-) => {
-  return Alert.findOne({
-    _id: alertId,
-    team: teamId,
-  }).populate<AlertWithDisplayRefs>(DISPLAY_REF_POPULATE);
+): Promise<AlertWithDisplayRefs | null> => {
+  const alert = await getDatastore().alerts.getById(
+    teamKey(teamId),
+    String(alertId),
+  );
+  if (alert == null) return null;
+  const [populated] = await populateDisplayRefs(teamKey(teamId), [alert]);
+  return populated;
 };
-
-/** Represents the documents populated and projected by ALERT_PAGE_POPULATE */
-export type AlertPageRefs = {
-  // `_id` is not in the select below but Mongo returns it anyway
-  savedSearch: Pick<ISavedSearch, '_id' | 'name' | 'tags'> | null;
-  dashboard:
-    | (Pick<IDashboard, '_id' | 'name' | 'provisioned' | 'tags'> & {
-        tiles: { id: string; config?: { name?: string } }[];
-      })
-    | null;
-  createdBy?: Pick<IUser, 'email' | 'name'>;
-  silenced?: IAlert['silenced'] & {
-    by: Pick<IUser, 'email'>;
-  };
-};
-
-/**
- * Projections for the internal alerts surfaces (the alerts page and the alert
- * detail endpoint), kept to what the response actually renders.
- */
-export const ALERT_PAGE_POPULATE = [
-  { path: 'savedSearch', select: 'name tags' },
-  {
-    path: 'dashboard',
-    select: 'name provisioned tags tiles.id tiles.config.name',
-  },
-  { path: 'createdBy', select: 'email name' },
-  { path: 'silenced.by', select: 'email' },
-];
 
 export const getAlertEnhanced = async (
   alertId: ObjectId | string,
-  teamId: ObjectId,
-) => {
-  return Alert.findOne({ _id: alertId, team: teamId }).populate<AlertPageRefs>(
-    ALERT_PAGE_POPULATE,
+  teamId: ObjectId | string,
+): Promise<AlertWithRefs | null> => {
+  const alert = await getDatastore().alerts.getById(
+    teamKey(teamId),
+    String(alertId),
   );
+  if (alert == null) return null;
+  const [populated] = await populatePageRefs(teamKey(teamId), [alert]);
+  return populated;
 };
 
-export const deleteAlert = async (id: string, teamId: ObjectId) => {
-  return Alert.deleteOne({
-    _id: id,
-    team: teamId,
-  });
+export const deleteAlert = async (id: string, teamId: ObjectId | string) => {
+  const deleted = await getDatastore().alerts.delete(teamKey(teamId), id);
+  return { deletedCount: deleted == null ? 0 : 1 };
 };
+
+export type { AlertRecord };

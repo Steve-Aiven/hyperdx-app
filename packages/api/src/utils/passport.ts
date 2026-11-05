@@ -2,7 +2,7 @@ import passport from 'passport';
 import { Strategy as LocalStrategy } from 'passport-local';
 
 import { findUserById } from '@/controllers/user';
-import type { UserDocument } from '@/models/user';
+import { getDatastore } from '@/datastore';
 import User from '@/models/user';
 
 import logger from './logger';
@@ -22,13 +22,22 @@ passport.deserializeUser(function (id: string, done) {
         // "no such user" signal: the request continues unauthenticated.
         return done(null, false);
       }
-      done(null, user as UserDocument);
+      done(null, user);
     })
     .catch(done);
 });
 
-// Use local passport strategy via passport-local-mongoose plugin
+// Mongo keeps passport-local-mongoose's authenticate (hash format and lockout
+// behavior); Postgres verifies against the datastore's own hash columns.
 const passportLocalMongooseAuthenticate = (User as any).authenticate();
+
+const authenticate = async (username: string, password: string) => {
+  const datastore = getDatastore();
+  if (datastore.backend === 'postgres') {
+    return datastore.users.authenticate(username, password);
+  }
+  return passportLocalMongooseAuthenticate(username, password);
+};
 
 passport.use(
   new LocalStrategy(
@@ -37,10 +46,7 @@ passport.use(
     },
     async function (username, password, done) {
       try {
-        const { user, error } = await passportLocalMongooseAuthenticate(
-          username,
-          password,
-        );
+        const { user, error } = await authenticate(username, password);
         if (error) {
           logger.info({
             message: `Login for "${username}" failed, ${error}"`,

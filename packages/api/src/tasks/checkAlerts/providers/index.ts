@@ -2,14 +2,17 @@ import { ClickhouseClient } from '@hyperdx/common-utils/dist/clickhouse/node';
 import { AlertChartConfig, Tile } from '@hyperdx/common-utils/dist/types';
 import _ from 'lodash';
 
+import type {
+  AlertRecord,
+  ConnectionRecord,
+  DashboardRecord,
+  SavedSearchRecord,
+  SourceRecord,
+  WebhookTarget,
+} from '@/datastore/types';
 import { ObjectId } from '@/models';
-import { IAlert, IAlertError } from '@/models/alert';
+import { IAlertError } from '@/models/alert';
 import { IAlertHistory, IAlertHistoryAnalytics } from '@/models/alertHistory';
-import { IConnection } from '@/models/connection';
-import { IDashboard } from '@/models/dashboard';
-import { ISavedSearch } from '@/models/savedSearch';
-import { ISource } from '@/models/source';
-import { IWebhook } from '@/models/webhook';
 import { AggregatedAlertHistory } from '@/tasks/checkAlerts';
 import DefaultAlertProvider from '@/tasks/checkAlerts/providers/default';
 import logger from '@/utils/logger';
@@ -21,7 +24,9 @@ export enum AlertTaskType {
 }
 
 // Discriminated union of possible alert channel types with populated channel data
-export type PopulatedAlertChannel = { type: 'webhook' } & { channel: IWebhook };
+export type PopulatedAlertChannel = { type: 'webhook' } & {
+  channel: WebhookTarget;
+};
 
 // Details about the alert and the source for the alert. Depending on
 // the taskType either:
@@ -32,7 +37,7 @@ export type PopulatedAlertChannel = { type: 'webhook' } & { channel: IWebhook };
 // The dependent typing means less null checks when using these values as
 // the are required when the type is set accordingly.
 export type AlertDetails = {
-  alert: IAlert;
+  alert: AlertRecord;
   previousMap: Map<string, AggregatedAlertHistory>; // Map of alertId||group -> history for group-by alerts
   // For multi-window alerts (numConsecutiveWindows > 1): the recent per-group
   // history (alertId||group -> histories, newest-first).
@@ -40,21 +45,21 @@ export type AlertDetails = {
 } & (
   | {
       taskType: AlertTaskType.SAVED_SEARCH;
-      source: ISource;
-      savedSearch: Omit<ISavedSearch, 'source'>;
+      source: SourceRecord;
+      savedSearch: Omit<SavedSearchRecord, 'source'>;
     }
   | {
       taskType: AlertTaskType.TILE;
-      source?: ISource;
+      source?: SourceRecord;
       tile: Tile;
-      dashboard: IDashboard;
+      dashboard: DashboardRecord;
     }
   | {
       // Inline alerts: the config lives on the alert document. `source` is
       // present for builder configs and optional for raw SQL configs (which
       // carry the connection directly).
       taskType: AlertTaskType.INLINE;
-      source?: ISource;
+      source?: SourceRecord;
       chartConfig: AlertChartConfig;
     }
 );
@@ -63,7 +68,7 @@ export type AlertDetails = {
 // them. The `metadata` field is only valid when T is defined to be a legal type.
 export type AlertTask<T = never> = {
   alerts: AlertDetails[];
-  conn: IConnection;
+  conn: ConnectionRecord;
   now: Date;
 } & ([T] extends [never] ? unknown : { metadata: T });
 
@@ -76,7 +81,7 @@ export interface AlertProvider {
 
   buildLogSearchLink(params: {
     endTime: Date;
-    savedSearch: ISavedSearch;
+    savedSearch: SavedSearchRecord;
     startTime: Date;
   }): string;
 
@@ -143,11 +148,11 @@ export interface AlertProvider {
   ): Promise<void>;
 
   /** Fetch all webhooks for the given team, returning a map of webhook ID to webhook */
-  getWebhooks(teamId: string | ObjectId): Promise<Map<string, IWebhook>>;
+  getWebhooks(teamId: string | ObjectId): Promise<Map<string, WebhookTarget>>;
 
   /** Create and return an authenticated ClickHouse client */
   getClickHouseClient(
-    connection: IConnection,
+    connection: ConnectionRecord,
     requestTimeout?: number,
   ): Promise<ClickhouseClient>;
 }

@@ -128,6 +128,9 @@ const makeSearchView = (
     interval: '1m',
   },
   source: {
+    _id: 'fake-source-id',
+    createdAt: new Date(),
+    updatedAt: new Date(),
     id: 'fake-source-id',
     kind: SourceKind.Log,
     team: 'team-123',
@@ -175,7 +178,7 @@ const makeTileView = (
     tileId: (overrides.tile ?? testTile).id,
   },
   dashboard: {
-    _id: new mongoose.Types.ObjectId(),
+    _id: 'id-123',
     id: 'id-123',
     name: 'My Dashboard',
     tiles: [overrides.tile ?? testTile],

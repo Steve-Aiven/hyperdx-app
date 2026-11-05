@@ -57,9 +57,12 @@ export const isOperationalError = (error: Error) => {
   return false;
 };
 
-// MongoDB duplicate-key error (unique-index violation). Used to translate a
-// racing or colliding write into a 400 instead of a generic 500.
-export const isDuplicateKeyError = (e: unknown): boolean =>
-  e != null &&
-  typeof e === 'object' &&
-  (e as { code?: unknown }).code === 11000;
+// Unique-index violation: MongoDB code 11000, PostgreSQL SQLSTATE 23505. Used
+// to translate a racing or colliding write into a 400 instead of a generic 500.
+export const isDuplicateKeyError = (e: unknown): boolean => {
+  if (e == null || typeof e !== 'object') {
+    return false;
+  }
+  const code = (e as { code?: unknown }).code;
+  return code === 11000 || code === '23505';
+};

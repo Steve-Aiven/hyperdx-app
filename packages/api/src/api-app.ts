@@ -1,10 +1,10 @@
 import compression from 'compression';
-import MongoStore from 'connect-mongo';
 import express from 'express';
 import session from 'express-session';
 import onHeaders from 'on-headers';
 
 import * as config from './config';
+import { getDatastore } from './datastore';
 import mcpRouter from './mcp/app';
 import { isUserAuthenticated } from './middleware/auth';
 import defaultCors from './middleware/cors';
@@ -43,7 +43,7 @@ const sess: session.SessionOptions & { cookie: session.CookieOptions } = {
     maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
   },
   rolling: true,
-  store: new MongoStore({ mongoUrl: config.MONGO_URI }),
+  store: getDatastore().createSessionStore(),
 };
 
 app.set('trust proxy', 1);

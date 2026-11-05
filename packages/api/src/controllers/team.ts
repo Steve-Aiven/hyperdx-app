@@ -2,15 +2,14 @@ import {
   TagResourceType,
   TeamClickHouseSettingsUpdate,
 } from '@hyperdx/common-utils/dist/types';
+import { pick } from 'lodash';
 import mongoose from 'mongoose';
 import { v4 as uuidv4 } from 'uuid';
 
 import * as config from '@/config';
+import { getDatastore } from '@/datastore';
+import type { TeamRecord } from '@/datastore/types';
 import type { ObjectId } from '@/models';
-import Alert from '@/models/alert';
-import Dashboard from '@/models/dashboard';
-import { SavedSearch } from '@/models/savedSearch';
-import Team, { type ITeam, type TeamDocument } from '@/models/team';
 
 export function getTeamInviteUrl(token: string) {
   return `${config.FRONTEND_URL}/join-team?token=${token}`;
@@ -36,8 +35,7 @@ export async function isTeamExisting() {
     return true;
   }
 
-  const teamCount = await Team.countDocuments({});
-  return teamCount > 0;
+  return getDatastore().teams.isExisting();
 }
 
 export async function createTeam({
@@ -51,96 +49,64 @@ export async function createTeam({
     throw new Error('Team already exists');
   }
 
-  const team = new Team({ name, collectorAuthenticationEnforced });
-
-  await team.save();
-
-  return team;
+  return getDatastore().teams.create({ name, collectorAuthenticationEnforced });
 }
 
-export function getAllTeams(fields?: string[]) {
+export async function getAllTeams(fields?: readonly (keyof TeamRecord)[]) {
   if (config.IS_LOCAL_APP_MODE) {
     return [LOCAL_APP_TEAM];
   }
 
-  return Team.find({}, fields);
+  const teams = await getDatastore().teams.getAll();
+  return fields ? teams.map(team => pick(team, fields)) : teams;
 }
 
-export function getTeam<const F extends readonly (keyof ITeam)[]>(
+export async function getTeam<const F extends readonly (keyof TeamRecord)[]>(
   id: string | ObjectId,
   fields: F,
-): mongoose.Query<
-  mongoose.HydratedDocument<Pick<ITeam, F[number]>> | null,
-  any
->;
-export function getTeam(
+): Promise<Pick<TeamRecord, F[number] | '_id' | 'id'> | null>;
+export async function getTeam(
   id: string | ObjectId,
-): mongoose.Query<TeamDocument | null, any>;
-export function getTeam(id: string | ObjectId, fields?: readonly string[]) {
+): Promise<TeamRecord | null>;
+export async function getTeam(
+  id: string | ObjectId,
+  fields?: readonly (keyof TeamRecord)[],
+) {
   if (config.IS_LOCAL_APP_MODE) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
     return LOCAL_APP_TEAM as any;
   }
 
-  return Team.findOne({}, fields);
+  const team = await getDatastore().teams.getById(id.toString());
+  // Projection is applied here so the response never carries fields the
+  // caller did not ask for (e.g. hookId).
+  return team && fields ? pick(team, [...fields, '_id', 'id']) : team;
 }
 
-export function getTeamByApiKey(apiKey: string) {
+export async function getTeamByApiKey(apiKey: string) {
   if (config.IS_LOCAL_APP_MODE) {
     return LOCAL_APP_TEAM;
   }
 
-  return Team.findOne({ apiKey });
+  return getDatastore().teams.getByApiKey(apiKey);
 }
 
-export function rotateTeamApiKey(teamId: ObjectId) {
-  return Team.findByIdAndUpdate(teamId, { apiKey: uuidv4() }, { new: true });
+export function rotateTeamApiKey(teamId: string | ObjectId) {
+  return getDatastore().teams.rotateApiKey(teamId.toString());
 }
 
-export function setTeamName(teamId: ObjectId, name: string) {
-  return Team.findByIdAndUpdate(teamId, { name }, { new: true });
+export function setTeamName(teamId: string | ObjectId, name: string) {
+  return getDatastore().teams.setName(teamId.toString(), name);
 }
 
 export function updateTeamClickhouseSettings(
-  teamId: ObjectId,
+  teamId: string | ObjectId,
   settings: TeamClickHouseSettingsUpdate,
 ) {
-  const $set: Record<string, any> = {};
-  const $unset: Record<string, any> = {};
-
-  for (const [key, value] of Object.entries(settings)) {
-    if (value === null) {
-      $unset[key] = '';
-    } else if (value !== undefined) {
-      $set[key] = value;
-    }
-  }
-
-  const update: Record<string, any> = {};
-  if (Object.keys($set).length > 0) update.$set = $set;
-  if (Object.keys($unset).length > 0) update.$unset = $unset;
-
-  return Team.findByIdAndUpdate(teamId, update, { new: true });
-}
-
-function getCollectionsWithTags(
-  resourceType?: TagResourceType,
-): Pick<mongoose.Model<unknown>, 'aggregate'>[] {
-  if (resourceType == null) {
-    return [Alert, Dashboard, SavedSearch];
-  }
-
-  switch (resourceType) {
-    case 'alert':
-      return [Alert];
-    case 'dashboard':
-      return [Dashboard];
-    case 'savedSearch':
-      return [SavedSearch];
-    default:
-      resourceType satisfies never;
-      throw new Error(`${resourceType} is not a valid TagResourceType`);
-  }
+  return getDatastore().teams.updateClickhouseSettings(
+    teamId.toString(),
+    settings,
+  );
 }
 
 /**
@@ -148,20 +114,34 @@ function getCollectionsWithTags(
  * when `resourceType` is given.
  */
 export async function getTags(
-  teamId: ObjectId,
+  teamId: string | ObjectId,
   resourceType?: TagResourceType,
 ) {
-  const distinctTagsPipeline: mongoose.PipelineStage[] = [
-    { $match: { team: teamId } },
-    { $unwind: '$tags' },
-    { $group: { _id: '$tags' } },
-  ];
+  const { alerts, dashboards, savedSearches } = getDatastore();
+  const id = teamId.toString();
 
-  const tagGroups = await Promise.all(
-    getCollectionsWithTags(resourceType).map(collection =>
-      collection.aggregate<{ _id: string }>(distinctTagsPipeline),
-    ),
-  );
+  let sources: Promise<string[]>[];
+  switch (resourceType) {
+    case undefined:
+      sources = [
+        alerts.distinctTags(id),
+        dashboards.distinctTags(id),
+        savedSearches.distinctTags(id),
+      ];
+      break;
+    case 'alert':
+      sources = [alerts.distinctTags(id)];
+      break;
+    case 'dashboard':
+      sources = [dashboards.distinctTags(id)];
+      break;
+    case 'savedSearch':
+      sources = [savedSearches.distinctTags(id)];
+      break;
+    default:
+      resourceType satisfies never;
+      throw new Error(`${resourceType} is not a valid TagResourceType`);
+  }
 
-  return [...new Set(tagGroups.flat().map(t => t._id))];
+  return [...new Set((await Promise.all(sources)).flat())];
 }

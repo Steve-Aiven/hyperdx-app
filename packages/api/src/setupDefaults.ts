@@ -231,7 +231,7 @@ export async function setupTeamDefaults(teamId: string) {
         // If we have fields to update, update the source
         if (Object.keys(updateFields).length > 0) {
           await updateSource(teamId, createdSource._id.toString(), {
-            ...createdSource.toObject(),
+            ...createdSource,
             ...updateFields,
           });
 

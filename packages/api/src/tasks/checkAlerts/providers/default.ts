@@ -6,7 +6,6 @@ import {
   RawSqlSavedChartConfig,
   Tile,
 } from '@hyperdx/common-utils/dist/types';
-import mongoose from 'mongoose';
 import ms from 'ms';
 import { URLSearchParams } from 'url';
 
@@ -14,22 +13,21 @@ import { ClickhouseClient } from '@/clickhouse';
 import * as config from '@/config';
 import { ALERT_HISTORY_QUERY_CONCURRENCY } from '@/controllers/alertHistory';
 import { LOCAL_APP_TEAM } from '@/controllers/team';
-import { connectDB, mongooseConnection, ObjectId } from '@/models';
-import Alert, {
-  AlertSource,
-  AlertState,
-  type IAlert,
-  type IAlertError,
-} from '@/models/alert';
-import AlertHistory, {
+import { getDatastore } from '@/datastore';
+import { canonicalId } from '@/datastore/ids';
+import type {
+  AlertRecord,
+  ConnectionRecord,
+  SavedSearchRecord,
+  SourceRecord,
+  WebhookRecord,
+} from '@/datastore/types';
+import type { ObjectId } from '@/models';
+import { AlertSource, AlertState, type IAlertError } from '@/models/alert';
+import type {
   IAlertHistory,
   IAlertHistoryAnalytics,
 } from '@/models/alertHistory';
-import Connection, { IConnection } from '@/models/connection';
-import Dashboard from '@/models/dashboard';
-import { type ISavedSearch, SavedSearch } from '@/models/savedSearch';
-import { type ISource, Source } from '@/models/source';
-import Webhook, { IWebhook } from '@/models/webhook';
 import {
   AggregatedAlertHistory,
   getConsecutiveWindowHistories,
@@ -47,17 +45,33 @@ import logger from '@/utils/logger';
 
 type PartialAlertDetails = MappedOmit<AlertDetails, 'previousMap'>;
 
+// Stored configs may spell the same ObjectId differently (e.g. uppercase hex).
+const sameId = (a: string, b: string) => {
+  try {
+    return canonicalId(a) === canonicalId(b);
+  } catch {
+    return a === b;
+  }
+};
+
+// Team-scoped lookups need ids in the form the datastore stores.
+const lookupId = (id: string) => {
+  try {
+    return canonicalId(id);
+  } catch {
+    return id;
+  }
+};
+
 async function getSavedSearchDetails(
-  alert: IAlert,
-): Promise<[IConnection, PartialAlertDetails] | []> {
+  alert: AlertRecord,
+): Promise<[ConnectionRecord, PartialAlertDetails] | []> {
+  const { savedSearches, sources, connections } = getDatastore();
   const savedSearchId = alert.savedSearch;
-  const savedSearch = await SavedSearch.findOne({
-    _id: savedSearchId,
-    team: alert.team,
-  }).populate<Omit<ISavedSearch, 'source'> & { source: ISource }>({
-    path: 'source',
-    match: { team: alert.team },
-  });
+  const savedSearch =
+    savedSearchId == null
+      ? null
+      : await savedSearches.getById(alert.team, savedSearchId);
 
   if (!savedSearch) {
     logger.error({
@@ -68,12 +82,20 @@ async function getSavedSearchDetails(
     return [];
   }
 
-  const { source } = savedSearch;
+  // Team-scoped, so a source that moved teams is not found.
+  const source = await sources.getById(alert.team, savedSearch.source);
+  if (!source) {
+    logger.error({
+      message: 'source not found',
+      sourceId: savedSearch.source,
+      alertId: alert.id,
+      savedSearchId,
+    });
+    return [];
+  }
+
   const connId = source.connection;
-  const conn = await Connection.findOne({
-    _id: connId,
-    team: alert.team,
-  }).select('+password');
+  const conn = await connections.getById(alert.team, connId, true);
   if (!conn) {
     logger.error({
       message: 'connection not found',
@@ -107,27 +129,23 @@ async function getSavedSearchDetails(
  * visible query error recorded on the alert.
  */
 async function getRawSqlSourceMetadata(
-  alert: IAlert,
+  alert: AlertRecord,
   chartConfig: RawSqlSavedChartConfig,
-): Promise<ISource | undefined> {
+): Promise<SourceRecord | undefined> {
   if (!chartConfig.source) {
     return undefined;
   }
-  const sourceDoc = await Source.findOne({
-    _id: chartConfig.source,
-    team: alert.team,
-  });
+  const sourceDoc = await getDatastore().sources.getById(
+    alert.team,
+    chartConfig.source,
+  );
   if (!sourceDoc) {
     return undefined;
   }
-  // Compare as ObjectIds: stored configs may hold non-canonical but valid
+  // Compare canonical ids: stored configs may hold non-canonical but valid
   // representations (e.g. uppercase hex), which a lexical compare would
   // misjudge as a mismatch.
-  if (
-    !new mongoose.Types.ObjectId(String(sourceDoc.connection)).equals(
-      chartConfig.connection,
-    )
-  ) {
+  if (!sameId(sourceDoc.connection, chartConfig.connection)) {
     logger.warn({
       message:
         'raw sql alert source has moved to a different connection; ignoring its metadata',
@@ -138,19 +156,20 @@ async function getRawSqlSourceMetadata(
     });
     return undefined;
   }
-  return sourceDoc.toObject();
+  return sourceDoc;
 }
 
 async function getTileDetails(
-  alert: IAlert,
-): Promise<[IConnection, PartialAlertDetails] | []> {
+  alert: AlertRecord,
+): Promise<[ConnectionRecord, PartialAlertDetails] | []> {
+  const { dashboards, sources, connections } = getDatastore();
   const dashboardId = alert.dashboard;
   const tileId = alert.tileId;
 
-  const dashboard = await Dashboard.findOne({
-    _id: dashboardId,
-    team: alert.team,
-  });
+  const dashboard =
+    dashboardId == null
+      ? null
+      : await dashboards.getById(alert.team, dashboardId);
   if (!dashboard) {
     logger.error({
       message: 'dashboard not found',
@@ -165,7 +184,7 @@ async function getTileDetails(
     logger.error({
       message: 'tile matching alert not found',
       tileId,
-      dashboardId: dashboard._id,
+      dashboardId: dashboard.id,
       alertId: alert.id,
     });
     return [];
@@ -175,7 +194,7 @@ async function getTileDetails(
     if (!displayTypeSupportsRawSqlAlerts(tile.config.displayType)) {
       logger.warn({
         tileId,
-        dashboardId: dashboard._id,
+        dashboardId: dashboard.id,
         alertId: alert.id,
         message:
           'skipping alert with raw sql chart config, only line/bar display types are supported',
@@ -184,17 +203,18 @@ async function getTileDetails(
     }
 
     // Raw SQL tiles store connection ID directly on the config
-    const connection = await Connection.findOne({
-      _id: tile.config.connection,
-      team: alert.team,
-    }).select('+password');
+    const connection = await connections.getById(
+      alert.team,
+      lookupId(tile.config.connection),
+      true,
+    );
 
     if (!connection) {
       logger.error({
         message: 'connection not found for raw sql tile',
         connectionId: tile.config.connection,
         tileId,
-        dashboardId: dashboard._id,
+        dashboardId: dashboard.id,
         alertId: alert.id,
       });
       return [];
@@ -215,43 +235,42 @@ async function getTileDetails(
     ];
   }
 
-  const source = await Source.findOne({
-    _id: tile.config.source,
-    team: alert.team,
-  }).populate<Omit<ISource, 'connection'> & { connection: IConnection }>({
-    path: 'connection',
-    match: { team: alert.team },
-    select: '+password',
-  });
+  const source = await sources.getById(
+    alert.team,
+    lookupId(tile.config.source),
+  );
   if (!source) {
     logger.error({
       message: 'source not found',
       sourceId: tile.config.source,
       tileId,
-      dashboardId: dashboard._id,
+      dashboardId: dashboard.id,
       alertId: alert.id,
     });
     return [];
   }
 
-  if (!source.connection) {
+  const connection = await getDatastore().connections.getById(
+    alert.team,
+    source.connection,
+    true,
+  );
+  if (!connection) {
     logger.error({
       message: 'connection not found',
       alertId: alert.id,
       tileId,
-      dashboardId: dashboard._id,
+      dashboardId: dashboard.id,
       sourceId: source.id,
     });
     return [];
   }
 
-  const connection = source.connection;
-  const sourceProps = source.toObject();
   return [
     connection,
     {
       alert,
-      source: { ...sourceProps, connection: connection.id },
+      source,
       taskType: AlertTaskType.TILE,
       tile,
       dashboard,
@@ -260,8 +279,8 @@ async function getTileDetails(
 }
 
 async function getInlineAlertDetails(
-  alert: IAlert,
-): Promise<[IConnection, PartialAlertDetails] | []> {
+  alert: AlertRecord,
+): Promise<[ConnectionRecord, PartialAlertDetails] | []> {
   const chartConfig = alert.chartConfig;
   if (chartConfig == null) {
     logger.error({
@@ -282,10 +301,11 @@ async function getInlineAlertDetails(
     }
 
     // Raw SQL configs store the connection ID directly
-    const connection = await Connection.findOne({
-      _id: chartConfig.connection,
-      team: alert.team,
-    }).select('+password');
+    const connection = await getDatastore().connections.getById(
+      alert.team,
+      lookupId(chartConfig.connection),
+      true,
+    );
 
     if (!connection) {
       logger.error({
@@ -310,14 +330,12 @@ async function getInlineAlertDetails(
     ];
   }
 
-  const source = await Source.findOne({
-    _id: chartConfig.source,
-    team: alert.team,
-  }).populate<Omit<ISource, 'connection'> & { connection: IConnection }>({
-    path: 'connection',
-    match: { team: alert.team },
-    select: '+password',
-  });
+  const source = chartConfig.source
+    ? await getDatastore().sources.getById(
+        alert.team,
+        lookupId(chartConfig.source),
+      )
+    : null;
   if (!source) {
     logger.error({
       message: 'source not found',
@@ -327,7 +345,12 @@ async function getInlineAlertDetails(
     return [];
   }
 
-  if (!source.connection) {
+  const connection = await getDatastore().connections.getById(
+    alert.team,
+    source.connection,
+    true,
+  );
+  if (!connection) {
     logger.error({
       message: 'connection not found',
       alertId: alert.id,
@@ -336,13 +359,11 @@ async function getInlineAlertDetails(
     return [];
   }
 
-  const connection = source.connection;
-  const sourceProps = source.toObject();
   return [
     connection,
     {
       alert,
-      source: { ...sourceProps, connection: connection.id },
+      source,
       taskType: AlertTaskType.INLINE,
       chartConfig,
     },
@@ -350,23 +371,23 @@ async function getInlineAlertDetails(
 }
 
 async function loadAlert(
-  alert: IAlert,
+  rawAlert: AlertRecord,
   groupedTasks: Map<string, AlertTask>,
   previousAlerts: Map<string, AggregatedAlertHistory>,
   recentHistoryMap: Map<string, AggregatedAlertHistory[]>,
   now: Date,
 ) {
-  if (!alert.source) {
+  if (!rawAlert.source) {
     throw new Error('alert does not have a source');
   }
 
-  if (config.IS_LOCAL_APP_MODE) {
-    // The id is the 12 character string `_local_team_', which will become an ObjectId
-    // as the ASCII hex values, so 5f6c6f63616c5f7465616d5f.
-    alert.team = new mongoose.Types.ObjectId(LOCAL_APP_TEAM.id);
-  }
+  // The id is the 12 character string `_local_team_', which becomes an
+  // ObjectId as the ASCII hex values, so 5f6c6f63616c5f7465616d5f.
+  const alert = config.IS_LOCAL_APP_MODE
+    ? { ...rawAlert, team: canonicalId(LOCAL_APP_TEAM.id) }
+    : rawAlert;
 
-  let conn: IConnection | undefined;
+  let conn: ConnectionRecord | undefined;
   let details: PartialAlertDetails | undefined;
   switch (alert.source) {
     case AlertSource.SAVED_SEARCH:
@@ -414,16 +435,16 @@ export default class DefaultAlertProvider implements AlertProvider {
     // prevents background createIndexes calls from racing the short-lived
     // connection close (which sends endSessions), surfaced as
     // MongoExpiredSessionError on mongodb.createIndexes spans.
-    await Promise.all([connectDB({ autoIndex: false })]);
+    await getDatastore().connect({ autoIndex: false });
   }
 
   async asyncDispose() {
-    await Promise.all([mongooseConnection.close()]);
+    await getDatastore().disconnect();
   }
 
   async getAlertTasks(): Promise<AlertTask[]> {
     const groupedTasks = new Map<string, AlertTask>();
-    const alerts = await Alert.find({});
+    const alerts = await getDatastore().alerts.listAll();
 
     const now = new Date();
     const alertIds = alerts.map(({ id }) => id);
@@ -467,7 +488,7 @@ export default class DefaultAlertProvider implements AlertProvider {
     startTime,
   }: {
     endTime: Date;
-    savedSearch: ISavedSearch;
+    savedSearch: SavedSearchRecord;
     startTime: Date;
   }): string {
     const url = new URL(`${config.FRONTEND_URL}/search/${savedSearch.id}`);
@@ -544,7 +565,9 @@ export default class DefaultAlertProvider implements AlertProvider {
     // Save history records first (in parallel), then update alert state
     // Use Promise.allSettled to handle partial failures gracefully
     const historyResults = await Promise.allSettled(
-      histories.map(history => AlertHistory.create(history)),
+      histories.map(history =>
+        getDatastore().alertHistories.create(alertId, history),
+      ),
     );
 
     // Log any failed history saves but continue with alert state update
@@ -579,10 +602,7 @@ export default class DefaultAlertProvider implements AlertProvider {
         : AlertState.OK;
 
     // Update alert state + errors based on this execution
-    await Alert.updateOne(
-      { _id: new mongoose.Types.ObjectId(alertId) },
-      { $set: { state: finalState, executionErrors: errors } },
-    );
+    await getDatastore().alerts.setExecutionResult(alertId, errors, finalState);
 
     // All histories in one execution share the same createdAt (the current
     // evaluation window start) and the same evaluation-level analytics.
@@ -602,11 +622,11 @@ export default class DefaultAlertProvider implements AlertProvider {
     // (e.g. a webhook failure recorded alongside its normal rows) that is
     // never retried, so it is a truthful record that must survive.
     if (evaluationWindowStart != null && successfulHistories.length > 0) {
-      await AlertHistory.deleteMany({
-        alert: new mongoose.Types.ObjectId(alertId),
+      await getDatastore().alertHistories.deleteMany({
+        alertId,
         state: AlertState.ERROR,
         createdAt: evaluatedDateRange
-          ? { $gt: evaluatedDateRange[0], $lte: evaluationWindowStart }
+          ? { gt: evaluatedDateRange[0], lte: evaluationWindowStart }
           : evaluationWindowStart,
       });
     }
@@ -630,10 +650,7 @@ export default class DefaultAlertProvider implements AlertProvider {
     evaluationWindowStart?: Date,
     analytics?: IAlertHistoryAnalytics,
   ) {
-    await Alert.updateOne(
-      { _id: new mongoose.Types.ObjectId(alertId) },
-      { $set: { executionErrors: errors } },
-    );
+    await getDatastore().alerts.setExecutionResult(alertId, errors);
 
     if (evaluationWindowStart != null) {
       await this.upsertErrorHistory(
@@ -658,29 +675,21 @@ export default class DefaultAlertProvider implements AlertProvider {
     errors: IAlertError[],
     analytics?: IAlertHistoryAnalytics,
   ) {
-    await AlertHistory.updateOne(
-      {
-        alert: new mongoose.Types.ObjectId(alertId),
-        createdAt: evaluationWindowStart,
-        state: AlertState.ERROR,
-      },
-      {
-        $set: { errors, ...(analytics != null && { analytics }) },
-        $setOnInsert: { counts: 0, lastValues: [] },
-      },
-      { upsert: true },
+    await getDatastore().alertHistories.upsertError(
+      alertId,
+      evaluationWindowStart,
+      errors,
+      analytics,
     );
   }
 
   async getWebhooks(teamId: string | ObjectId) {
-    const webhooks = await Webhook.find({
-      team: new mongoose.Types.ObjectId(teamId),
-    });
-    return new Map<string, IWebhook>(webhooks.map(w => [w.id, w]));
+    const webhooks = await getDatastore().webhooks.listByTeam(String(teamId));
+    return new Map<string, WebhookRecord>(webhooks.map(w => [w.id, w]));
   }
 
   async getClickHouseClient(
-    { host, username, password, id }: IConnection,
+    { host, username, password, id }: ConnectionRecord,
     requestTimeout?: number,
   ): Promise<ClickhouseClient> {
     if (!password && password !== '') {

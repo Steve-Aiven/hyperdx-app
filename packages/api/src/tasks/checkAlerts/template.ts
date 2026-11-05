@@ -30,16 +30,18 @@ import { serializeError } from 'serialize-error';
 import { z } from 'zod';
 
 import { AlertInput } from '@/controllers/alerts';
+import type {
+  DashboardRecord,
+  SavedSearchRecord,
+  SourceRecord,
+  WebhookTarget,
+} from '@/datastore/types';
 import {
   AlertChannel,
   AlertSource,
   AlertState,
   getAlertChannels,
 } from '@/models/alert';
-import { IDashboard } from '@/models/dashboard';
-import { ISavedSearch } from '@/models/savedSearch';
-import { ISource } from '@/models/source';
-import { IWebhook } from '@/models/webhook';
 import {
   computeAliasWithClauses,
   doesExceedThreshold,
@@ -161,8 +163,8 @@ const describeChartConfigQuery = (config: SavedChartConfig): string => {
 // itself, so both were reported as empty before.
 const describeSourceQuery = (
   alert: AlertInput,
-  savedSearch?: ISavedSearch | null,
-  dashboard?: IDashboard | null,
+  savedSearch?: SavedSearchRecord | null,
+  dashboard?: DashboardRecord | null,
 ): string => {
   if (alert.source === AlertSource.INLINE) {
     return alert.chartConfig ? describeChartConfigQuery(alert.chartConfig) : '';
@@ -250,13 +252,13 @@ const zNotifyFnParams = z.object({
 export type AlertMessageTemplateDefaultView = {
   alert: AlertInput;
   attributes: ReturnType<typeof unflattenObject>;
-  dashboard?: IDashboard | null;
+  dashboard?: DashboardRecord | null;
   endTime: Date;
   granularity: string;
   group?: string;
   isGroupedAlert: boolean;
-  savedSearch?: ISavedSearch | null;
-  source?: ISource | null;
+  savedSearch?: SavedSearchRecord | null;
+  source?: SourceRecord | null;
   startTime: Date;
   value: number;
 };
@@ -427,7 +429,7 @@ export const translateExternalActionsToInternal = (template: string) => {
 
 const findWebhookByName = (
   channelIdOrNamePrefix: string,
-  teamWebhooksById: Map<string, IWebhook>,
+  teamWebhooksById: Map<string, WebhookTarget>,
 ) => {
   return [...teamWebhooksById.values()].find(w =>
     w.name.startsWith(channelIdOrNamePrefix),
@@ -437,7 +439,7 @@ const findWebhookByName = (
 const getPopulatedChannel = (
   channelType: AlertChannelType,
   channelIdOrNamePrefix: string,
-  teamWebhooksById: Map<string, IWebhook>,
+  teamWebhooksById: Map<string, WebhookTarget>,
 ): PopulatedAlertChannel => {
   switch (channelType) {
     case 'webhook': {
@@ -542,10 +544,10 @@ export const fetchSampleLines = async ({
   endTime: Date;
   metadata: Metadata;
   savedSearch: Pick<
-    ISavedSearch,
+    SavedSearchRecord,
     'id' | 'select' | 'where' | 'whereLanguage' | 'orderBy' | 'filters'
   >;
-  source: ISource;
+  source: SourceRecord;
   startTime: Date;
 }): Promise<string> => {
   const chartConfig: ChartConfigWithOptDateRange = {
@@ -629,7 +631,7 @@ export const renderAlertTemplate = async ({
   title: string;
   view: AlertMessageTemplateDefaultView;
   teamId: string;
-  teamWebhooksById: Map<string, IWebhook>;
+  teamWebhooksById: Map<string, WebhookTarget>;
   dispatcher?: NotificationDispatcher;
   /**
    * Supplies the sample rows for a saved-search body. The evaluation passes a

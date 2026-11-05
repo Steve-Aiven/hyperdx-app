@@ -9,7 +9,8 @@ import {
   findUserByEmail,
   findUsersByTeam,
 } from '@/controllers/user';
-import TeamInvite from '@/models/teamInvite';
+import { getDatastore } from '@/datastore';
+import { isDuplicateKeyError } from '@/utils/errors';
 import { objectIdSchema } from '@/utils/zod';
 
 const router = express.Router();
@@ -77,7 +78,7 @@ router.get('/members', async (req, res, next) => {
         id: user._id.toString(),
         email: user.email,
         name: user.name,
-        isCurrentUser: !!userId && user._id.equals(userId),
+        isCurrentUser: !!userId && user._id === userId.toString(),
       })),
     });
   } catch (e) {
@@ -125,27 +126,28 @@ router.post(
         });
       }
 
-      let teamInvite = await TeamInvite.findOne({
-        teamId: teamId.toString(),
-        email: normalizedEmail,
-      });
+      const { teamInvites } = getDatastore();
+      let teamInvite = await teamInvites.findByTeamAndEmail(
+        teamId.toString(),
+        normalizedEmail,
+      );
 
       if (!teamInvite) {
         try {
-          teamInvite = await new TeamInvite({
+          teamInvite = await teamInvites.create({
             teamId: teamId.toString(),
             name,
             email: normalizedEmail,
             token: crypto.randomBytes(32).toString('hex'),
-          }).save();
-        } catch (err: any) {
+          });
+        } catch (err: unknown) {
           // ponytail: concurrent insert lost the race on the {teamId, email}
           // unique index — re-fetch the winner's doc to stay idempotent.
-          if (err?.code === 11000) {
-            teamInvite = await TeamInvite.findOne({
-              teamId: teamId.toString(),
-              email: normalizedEmail,
-            });
+          if (isDuplicateKeyError(err)) {
+            teamInvite = await teamInvites.findByTeamAndEmail(
+              teamId.toString(),
+              normalizedEmail,
+            );
           }
           if (!teamInvite) {
             throw err;
@@ -186,14 +188,13 @@ router.get('/invitations', async (req, res, next) => {
       return res.sendStatus(403);
     }
 
-    const teamInvites = await TeamInvite.find(
-      { teamId: teamId.toString() },
-      { createdAt: 1, email: 1, name: 1, token: 1 },
+    const teamInvites = await getDatastore().teamInvites.listByTeam(
+      teamId.toString(),
     );
 
     return res.json({
       data: teamInvites.map(ti => ({
-        id: ti._id.toString(),
+        id: ti._id,
         createdAt: ti.createdAt,
         email: ti.email,
         name: ti.name,
@@ -235,10 +236,10 @@ router.delete(
         return res.sendStatus(403);
       }
 
-      const teamInvite = await TeamInvite.findOneAndDelete({
-        _id: req.params.id,
-        teamId: teamId.toString(),
-      });
+      const teamInvite = await getDatastore().teamInvites.deleteById(
+        req.params.id,
+        teamId.toString(),
+      );
 
       if (!teamInvite) {
         return res.sendStatus(404);
