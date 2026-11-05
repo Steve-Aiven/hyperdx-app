@@ -1,5 +1,12 @@
 # @hyperdx/cli
 
+## 0.8.1
+
+### Patch Changes
+
+- e2754d203: fix: use SHA256 instead of MD5 for JSON row lookup WHERE clauses so row
+  details and drill-down work on FIPS-enabled ClickHouse deployments
+
 ## 0.8.0
 
 ### Minor Changes
