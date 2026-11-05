@@ -14,6 +14,7 @@ import ms from 'ms';
 import * as config from '@/config';
 import { createAlert } from '@/controllers/alerts';
 import { createTeam } from '@/controllers/team';
+import type { AlertRecord } from '@/datastore/types';
 import {
   bulkInsertData,
   bulkInsertLogs,
@@ -27,13 +28,12 @@ import {
   RAW_SQL_ALERT_TEMPLATE,
   RAW_SQL_NUMBER_ALERT_TEMPLATE,
 } from '@/fixtures';
-import Alert, { AlertSource, IAlert } from '@/models/alert';
+import Alert, { AlertSource } from '@/models/alert';
 import AlertHistory from '@/models/alertHistory';
 import Connection, { IConnection } from '@/models/connection';
 import Dashboard, { IDashboard } from '@/models/dashboard';
 import { ISavedSearch, SavedSearch } from '@/models/savedSearch';
 import { ISource, LogSource, Source } from '@/models/source';
-import { ITeam } from '@/models/team';
 import Webhook, { IWebhook } from '@/models/webhook';
 import * as checkAlert from '@/tasks/checkAlerts';
 import {
@@ -1260,6 +1260,9 @@ describe('checkAlerts', () => {
         interval: '1m',
       },
       source: {
+        _id: 'fake-source-id',
+        createdAt: new Date(),
+        updatedAt: new Date(),
         id: 'fake-source-id',
         kind: SourceKind.Log,
         team: 'team-123',
@@ -1309,7 +1312,7 @@ describe('checkAlerts', () => {
         tileId: 'test-tile-id',
       },
       dashboard: {
-        _id: new mongoose.Types.ObjectId(),
+        _id: 'id-123',
         id: 'id-123',
         name: 'My Dashboard',
         tiles: [testTile],
@@ -2101,7 +2104,7 @@ describe('checkAlerts', () => {
     };
 
     const createAlertDetails = async (
-      team: ITeam,
+      team: { _id: string | mongoose.Types.ObjectId },
       source: ISource | undefined,
       alertConfig: Parameters<typeof createAlert>[1],
       additionalDetails:
@@ -2127,19 +2130,13 @@ describe('checkAlerts', () => {
         'savedSearch',
       ]);
 
-      return additionalDetails.taskType === AlertTaskType.SAVED_SEARCH
-        ? {
-            alert: enhancedAlert,
-            source: source!,
-            previousMap: new Map(),
-            ...additionalDetails,
-          }
-        : {
-            alert: enhancedAlert,
-            source,
-            previousMap: new Map(),
-            ...additionalDetails,
-          };
+      // Mongoose documents stand in for records in these int tests.
+      return {
+        alert: enhancedAlert,
+        source,
+        previousMap: new Map(),
+        ...additionalDetails,
+      } as unknown as AlertDetails;
     };
 
     const processAlertAtTime = async (
@@ -9902,7 +9899,8 @@ describe('checkAlerts', () => {
 
       // Update the details.alert object to reflect the silenced state
       // (simulates what would happen if the alert was silenced before task queuing)
-      details.alert.silenced = alertDoc!.silenced;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      details.alert.silenced = alertDoc!.silenced as AlertRecord['silenced'];
 
       // Process the alert - should skip firing because it's silenced
       await processAlertAtTime(
@@ -9985,7 +9983,8 @@ describe('checkAlerts', () => {
       await alertDoc!.save();
 
       // Update the details.alert object to reflect the expired silenced state
-      details.alert.silenced = alertDoc!.silenced;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+      details.alert.silenced = alertDoc!.silenced as AlertRecord['silenced'];
 
       // Process the alert - should fire because silence has expired
       await processAlertAtTime(
@@ -11890,13 +11889,15 @@ describe('checkAlerts', () => {
         'savedSearch',
       ]);
 
+      // Mongoose documents stand in for records in these int tests.
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       const details = {
         alert: enhancedAlert,
         source,
         previousMap: new Map(),
         taskType: AlertTaskType.SAVED_SEARCH,
         savedSearch,
-      } satisfies AlertDetails;
+      } as unknown as AlertDetails;
 
       const now = new Date('2023-11-16T22:12:00.000Z');
       const eventMs = new Date('2023-11-16T22:05:00.000Z');
@@ -12016,13 +12017,15 @@ describe('checkAlerts', () => {
         'savedSearch',
       ]);
 
+      // Mongoose documents stand in for records in these int tests.
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       const details = {
         alert: enhancedAlert,
         source,
         previousMap: new Map(),
         taskType: AlertTaskType.SAVED_SEARCH,
         savedSearch,
-      } satisfies AlertDetails;
+      } as unknown as AlertDetails;
 
       const now = new Date('2023-11-16T22:12:00.000Z');
       const eventMs = new Date('2023-11-16T22:05:00.000Z');
@@ -12296,13 +12299,13 @@ describe('checkAlerts', () => {
       id: mongoose.Types.ObjectId,
       numConsecutiveWindows?: number,
       interval = '5m',
-    ): IAlert =>
+    ): AlertRecord =>
       // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
       ({
         id: id.toString(),
         interval,
         numConsecutiveWindows,
-      }) as unknown as IAlert;
+      }) as unknown as AlertRecord;
 
     const saveHistory = (
       alertId: mongoose.Types.ObjectId,

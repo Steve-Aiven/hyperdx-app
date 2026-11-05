@@ -809,7 +809,7 @@ describe('Single Invocation Alert Test', () => {
       tile,
       dashboard,
       previousMap: new Map(),
-    } satisfies AlertDetails;
+    } as unknown as AlertDetails;
 
     const clickhouseClient = new ClickhouseClient({
       host: connection.host,
@@ -954,14 +954,15 @@ describe('Single Invocation Alert Test', () => {
 
     const tile = dashboard.tiles?.find((t: any) => t.id === 'number-tile-1');
 
-    const details: AlertDetails = {
+    // Mongoose documents stand in for records in this int test.
+    const details = {
       alert: enhancedAlert,
       source: undefined,
       taskType: AlertTaskType.TILE,
       tile: tile!,
       dashboard,
       previousMap: new Map(),
-    };
+    } as unknown as AlertDetails;
 
     const clickhouseClient = new ClickhouseClient({
       host: connection.host,

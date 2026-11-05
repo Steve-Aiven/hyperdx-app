@@ -29,8 +29,8 @@ import {
   findUserByEmail,
   findUsersByTeam,
 } from '@/controllers/user';
+import { getDatastore } from '@/datastore';
 import { getNonNullUserWithTeam } from '@/middleware/auth';
-import TeamInvite from '@/models/teamInvite';
 import { sendJson } from '@/utils/serialization';
 import { objectIdSchema } from '@/utils/zod';
 
@@ -170,18 +170,19 @@ router.post(
       const normalizedEmail = toEmail.toLowerCase();
 
       // Check for existing invitation with normalized email
-      let teamInvite = await TeamInvite.findOne({
+      const { teamInvites } = getDatastore();
+      let teamInvite = await teamInvites.findByTeamAndEmail(
         teamId,
-        email: normalizedEmail,
-      });
+        normalizedEmail,
+      );
 
       if (!teamInvite) {
-        teamInvite = await new TeamInvite({
+        teamInvite = await teamInvites.create({
           teamId,
           name,
           email: normalizedEmail,
           token: crypto.randomBytes(32).toString('hex'),
-        }).save();
+        });
       }
 
       res.json({
@@ -200,18 +201,10 @@ router.get('/invitations', async (req, res: TeamInviteExpressRes, next) => {
     if (teamId == null) {
       throw new Error(`User ${req.user?._id} not associated with a team`);
     }
-    const teamInvites = await TeamInvite.find(
-      { teamId },
-      {
-        createdAt: 1,
-        email: 1,
-        name: 1,
-        token: 1,
-      },
-    );
+    const teamInvites = await getDatastore().teamInvites.listByTeam(teamId);
     res.json({
       data: teamInvites.map(ti => ({
-        _id: ti._id.toString(),
+        _id: ti._id,
         createdAt: ti.createdAt.toISOString(),
         email: ti.email,
         name: ti.name,
@@ -240,7 +233,7 @@ router.delete(
       // pending invitation given its id.
       const { teamId } = getNonNullUserWithTeam(req);
 
-      const deleted = await TeamInvite.findOneAndDelete({ _id: id, teamId });
+      const deleted = await getDatastore().teamInvites.deleteById(id, teamId);
       if (deleted == null) {
         return res.sendStatus(404);
       }
@@ -266,13 +259,8 @@ router.get('/members', async (req, res: TeamMembersExpRes, next) => {
     const teamUsers = await findUsersByTeam(teamId);
     res.json({
       data: teamUsers.map(user => ({
-        ...pick(user.toJSON({ virtuals: true }), [
-          '_id',
-          'email',
-          'name',
-          'hasPasswordAuth',
-        ]),
-        isCurrentUser: user._id.equals(userId),
+        ...pick(user, ['_id', 'email', 'name', 'hasPasswordAuth']),
+        isCurrentUser: user._id === userId.toString(),
       })),
     });
   } catch (e) {

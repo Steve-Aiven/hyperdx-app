@@ -1,11 +1,14 @@
 import { z } from 'zod';
 
 import * as config from '@/config';
-import { getSavedSearch } from '@/controllers/savedSearch';
+import {
+  getSavedSearch,
+  toExternalSavedSearch,
+} from '@/controllers/savedSearch';
+import { getDatastore } from '@/datastore';
 import { READ_ONLY_TOOL } from '@/mcp/tools/annotations';
 import type { ToolRegistrar } from '@/mcp/tools/types';
 import { mcpUserError, validateObjectId } from '@/mcp/utils/errors';
-import { SavedSearch } from '@/models/savedSearch';
 
 export function registerGetSavedSearch({
   context,
@@ -36,12 +39,10 @@ export function registerGetSavedSearch({
     async ({ id }) => {
       // ── List all saved searches (slim query — only fetch the fields we need) ──
       if (!id) {
-        const savedSearches = await SavedSearch.find(
-          { team: teamId },
-          'name tags',
-        ).lean();
+        const savedSearches =
+          await getDatastore().savedSearches.listByTeam(teamId);
         const output = savedSearches.map(ss => ({
-          id: ss._id.toString(),
+          id: ss._id,
           name: ss.name,
           tags: ss.tags,
           ...(frontendUrl ? { url: `${frontendUrl}/search/${ss._id}` } : {}),
@@ -68,7 +69,7 @@ export function registerGetSavedSearch({
             type: 'text' as const,
             text: JSON.stringify(
               {
-                ...savedSearch.toExternalJSON(),
+                ...toExternalSavedSearch(savedSearch),
                 ...(frontendUrl
                   ? { url: `${frontendUrl}/search/${savedSearch._id}` }
                   : {}),

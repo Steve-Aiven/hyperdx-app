@@ -95,8 +95,7 @@ router.patch(
         teamId.toString(),
         req.params.id,
         {
-          ...savedSearch.toJSON(),
-          source: savedSearch.source.toString(),
+          ...savedSearch,
           ...updates,
         },
         userId?.toString(),

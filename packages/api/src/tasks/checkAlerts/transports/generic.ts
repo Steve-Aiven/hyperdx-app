@@ -9,7 +9,7 @@ import _ from 'lodash';
 import { performance } from 'perf_hooks';
 import { serializeError } from 'serialize-error';
 
-import { IWebhook } from '@/models/webhook';
+import type { WebhookTarget } from '@/datastore/types';
 import {
   WebhookRedirectError,
   WebhookResponseError,
@@ -48,7 +48,7 @@ export const webhookDeliveryDuration = getHistogram(
 
 export const logBlockedWebhookDelivery = (
   error: unknown,
-  webhook: IWebhook,
+  webhook: WebhookTarget,
 ) => {
   if (error instanceof WebhookUrlValidationError) {
     logger.warn(
@@ -177,8 +177,18 @@ const toStringHeaderRecord = (value: unknown): Record<string, string> => {
   );
 };
 
+// Records carry plain objects; the mongoose shape carries a Map whose
+// `toJSON()` yields one.
+const mapToPlain = (value: unknown): unknown =>
+  value != null &&
+  typeof value === 'object' &&
+  'toJSON' in value &&
+  typeof value.toJSON === 'function'
+    ? value.toJSON()
+    : value;
+
 const sendGenericWebhook = async (
-  webhook: IWebhook,
+  webhook: WebhookTarget,
   message: Message,
   signal?: AbortSignal,
 ) => {
@@ -190,7 +200,9 @@ const sendGenericWebhook = async (
     // user may have included params in both the url and the query params
     // so they should be merged
     const tmpURL = new URL(webhook.url);
-    for (const [key, value] of Object.entries(webhook.queryParams.toJSON())) {
+    for (const [key, value] of Object.entries(
+      toStringHeaderRecord(mapToPlain(webhook.queryParams)),
+    )) {
       tmpURL.searchParams.append(key, value);
     }
 
@@ -206,7 +218,7 @@ const sendGenericWebhook = async (
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json', // default, will be overwritten if user has set otherwise
-    ...toStringHeaderRecord(webhook.headers?.toJSON()),
+    ...toStringHeaderRecord(mapToPlain(webhook.headers)),
     // Stable per-alert key for receivers that honour Idempotency-Key; delivery is at-least-once.
     'Idempotency-Key': objectHash({
       eventId: message.eventId,

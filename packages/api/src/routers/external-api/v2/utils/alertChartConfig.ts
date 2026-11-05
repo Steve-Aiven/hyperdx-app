@@ -399,9 +399,7 @@ export function translateAlertDocumentToExternalAlertWithChartConfig(
   alert: TranslatableAlertDocument,
 ): ExternalAlert {
   const external = translateAlertDocumentToExternalAlert(alert);
-  const alertObj: Pick<IAlert, 'source' | 'chartConfig'> = alert.toJSON
-    ? alert.toJSON()
-    : alert;
+  const alertObj: Pick<IAlert, 'source' | 'chartConfig'> = alert;
   const chartConfig =
     alertObj.source === AlertSource.INLINE && alertObj.chartConfig != null
       ? convertAlertChartConfigToExternal(alertObj.chartConfig)

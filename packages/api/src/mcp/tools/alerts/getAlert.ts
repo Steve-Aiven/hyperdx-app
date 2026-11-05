@@ -1,19 +1,18 @@
 import { type AlertInterval } from '@hyperdx/common-utils/dist/types';
 import { ObjectId } from 'mongodb';
-import mongoose from 'mongoose';
 import { z } from 'zod';
 
 import * as config from '@/config';
 import { getRecentAlertHistories } from '@/controllers/alertHistory';
-import { getAlertById } from '@/controllers/alerts';
+import { populateDisplayRefs } from '@/controllers/alertRefs';
+import { getAlertWithDisplayRefs } from '@/controllers/alerts';
+import { getDatastore } from '@/datastore';
 import { READ_ONLY_TOOL } from '@/mcp/tools/annotations';
 import type { ToolRegistrar } from '@/mcp/tools/types';
 import { mcpUserError, validateObjectId } from '@/mcp/utils/errors';
-import Alert from '@/models/alert';
-import type { IDashboard } from '@/models/dashboard';
-import type { ISavedSearch } from '@/models/savedSearch';
+import { AlertState } from '@/models/alert';
 import { translateAlertDocumentToExternalAlertWithChartConfig } from '@/routers/external-api/v2/utils/alertChartConfig';
-import { resolveAlertDisplayFields } from '@/utils/alerts';
+import { populatedRefOrNull, resolveAlertDisplayFields } from '@/utils/alerts';
 
 export function registerGetAlert({
   context,
@@ -54,24 +53,21 @@ export function registerGetAlert({
     async ({ id, state }) => {
       // ── List all alerts (slim summary) ──
       if (!id) {
-        const query: Record<string, unknown> = {
-          team: new mongoose.Types.ObjectId(teamId),
-        };
-        if (state) {
-          query.state = state;
-        }
-        const alerts = await Alert.find(query).populate<{
-          savedSearch: ISavedSearch | null;
-          dashboard: IDashboard | null;
-        }>(['savedSearch', 'dashboard']);
+        const records = await getDatastore().alerts.list(
+          teamId,
+          state
+            ? { state: Object.values(AlertState).filter(s => s === state) }
+            : {},
+        );
+        const alerts = await populateDisplayRefs(teamId, records);
 
         const output = alerts.map(alert => {
           const { displayName, tags } = resolveAlertDisplayFields(alert, {
-            savedSearch: alert.savedSearch,
-            dashboard: alert.dashboard,
+            savedSearch: populatedRefOrNull(alert.savedSearch),
+            dashboard: populatedRefOrNull(alert.dashboard),
           });
           return {
-            id: alert._id.toString(),
+            id: alert._id,
             name: alert.name,
             displayName,
             tags,
@@ -92,20 +88,15 @@ export function registerGetAlert({
       const idError = validateObjectId(id, 'alert ID');
       if (idError) return idError;
 
-      const alert = await getAlertById(id, teamId);
+      // Resolves the refs the display name/tags derive from, so alerts written
+      // before those fields existed still resolve to something meaningful.
+      const alert = await getAlertWithDisplayRefs(id, teamId);
       if (!alert) {
         return mcpUserError('Alert not found');
       }
 
-      // Populate the refs the display name/tags derive from, so alerts written
-      // before those fields existed still resolve to something meaningful.
-      const populated = await alert.populate<{
-        savedSearch: ISavedSearch | null;
-        dashboard: IDashboard | null;
-      }>(['savedSearch', 'dashboard']);
-
       const external =
-        translateAlertDocumentToExternalAlertWithChartConfig(populated);
+        translateAlertDocumentToExternalAlertWithChartConfig(alert);
 
       const history = await getRecentAlertHistories({
         alertId: new ObjectId(alert._id),

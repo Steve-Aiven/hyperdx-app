@@ -15,7 +15,7 @@ import {
   getSources,
   updateSource,
 } from '@/controllers/sources';
-import { SourceDocument } from '@/models/source';
+import type { SourceRecord } from '@/datastore/types';
 import { processRequestWithEnhancedErrors as validateRequest } from '@/utils/enhancedErrors';
 import logger from '@/utils/logger';
 import { objectIdSchema } from '@/utils/zod';
@@ -88,27 +88,9 @@ function rejectPromqlSourceWhenDisabled(
   next();
 }
 
-function formatExternalSource(source: SourceDocument) {
-  // Convert to JSON so that any ObjectIds are converted to strings
-  const json = JSON.stringify(
-    (() => {
-      switch (source.kind) {
-        case SourceKind.Log:
-          return source.toJSON({ getters: true });
-        case SourceKind.Trace:
-          return source.toJSON({ getters: true });
-        case SourceKind.Metric:
-          return source.toJSON({ getters: true });
-        case SourceKind.Session:
-          return source.toJSON({ getters: true });
-        case SourceKind.Promql:
-          return source.toJSON({ getters: true });
-        default:
-          source satisfies never;
-          return {};
-      }
-    })(),
-  );
+function formatExternalSource(source: SourceRecord) {
+  // JSON round-trip turns dates into strings, as the response will.
+  const json = JSON.stringify(source);
 
   const parseResult = toExternalSource(JSON.parse(json));
   if (parseResult.success) return parseResult.data;
@@ -900,7 +882,7 @@ router.get('/', async (req, res, next) => {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
-    const sources: SourceDocument[] = await getSources(teamId.toString());
+    const sources = await getSources(teamId.toString());
 
     return res.json({
       data: sources.map(formatExternalSource).filter(s => s !== undefined),
@@ -1060,7 +1042,7 @@ router.post(
 
       const source = await createSource(teamId.toString(), {
         ...req.body,
-        team: teamId.toJSON(),
+        team: teamId.toString(),
       });
 
       const data = formatExternalSource(source);
@@ -1166,7 +1148,7 @@ router.put(
 
       const source = await updateSource(teamId.toString(), req.params.id, {
         ...req.body,
-        team: teamId.toJSON(),
+        team: teamId.toString(),
       });
 
       if (source == null) {

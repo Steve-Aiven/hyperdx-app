@@ -5,40 +5,104 @@ import {
 import { groupBy } from 'lodash';
 import { z } from 'zod';
 
+import { populateCreators, toUserRef } from '@/controllers/alertRefs';
 import { deleteSavedSearchAlerts } from '@/controllers/alerts';
-import Alert from '@/models/alert';
-import { SavedSearch } from '@/models/savedSearch';
+import { getDatastore } from '@/datastore';
+import type { SavedSearchRecord } from '@/datastore/types';
 import { resolveAlertDisplayFields } from '@/utils/alerts';
 import logger from '@/utils/logger';
 
 type SavedSearchWithoutId = Omit<z.infer<typeof SavedSearchSchema>, 'id'>;
 
+export type ExternalSavedSearch = {
+  id: string;
+  name: string;
+  select?: string;
+  where?: string;
+  whereLanguage?: string;
+  orderBy?: string;
+  sourceId?: string;
+  tags?: string[];
+  filters?: unknown[];
+  teamId: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export function toExternalSavedSearch(
+  savedSearch: SavedSearchRecord,
+): ExternalSavedSearch {
+  return {
+    id: savedSearch._id,
+    name: savedSearch.name ?? '',
+    select: savedSearch.select,
+    where: savedSearch.where,
+    whereLanguage: savedSearch.whereLanguage,
+    orderBy: savedSearch.orderBy,
+    sourceId: savedSearch.source || undefined,
+    tags: savedSearch.tags,
+    filters: savedSearch.filters,
+    teamId: savedSearch.team ?? '',
+    createdAt:
+      savedSearch.createdAt instanceof Date
+        ? savedSearch.createdAt.toISOString()
+        : undefined,
+    updatedAt:
+      savedSearch.updatedAt instanceof Date
+        ? savedSearch.updatedAt.toISOString()
+        : undefined,
+  };
+}
+
 export async function getSavedSearches(
   teamId: string,
 ): Promise<SavedSearchListApiResponse[]> {
-  const savedSearches = await SavedSearch.find({ team: teamId })
-    .populate('createdBy', 'email name')
-    .populate('updatedBy', 'email name');
-  const alerts = await Alert.find(
-    { team: teamId, savedSearch: { $exists: true, $ne: null } },
-    { __v: 0 },
-  ).populate('createdBy', 'email name');
+  const { savedSearches: searchRepo, alerts: alertRepo } = getDatastore();
+  const [records, teamAlerts] = await Promise.all([
+    searchRepo.listByTeam(teamId),
+    alertRepo.listByTeam(teamId),
+  ]);
 
+  const userIds = [
+    ...new Set(
+      records
+        .flatMap(s => [s.createdBy, s.updatedBy])
+        .filter((id): id is string => id != null),
+    ),
+  ];
+  const users =
+    userIds.length > 0 ? await getDatastore().users.findByIds(userIds) : [];
+  const userById = new Map(users.map(u => [u._id, toUserRef(u)]));
+
+  const alerts = await populateCreators(
+    teamAlerts.filter(alert => alert.savedSearch != null),
+  );
   const alertsBySavedSearchId = groupBy(alerts, 'savedSearch');
 
-  return savedSearches.map(savedSearch => ({
-    ...savedSearch.toJSON(),
-    alerts: alertsBySavedSearchId[savedSearch._id.toString()]?.map(alert => ({
-      ...alert.toJSON(),
+  // The record's string createdBy/updatedBy become populated {email, name}
+  // refs; a deleted user resolves to undefined. Dates stay Dates here and
+  // become ISO strings in the JSON response, which the response type models.
+  const response = records.map(savedSearch => ({
+    ...savedSearch,
+    createdBy:
+      savedSearch.createdBy == null
+        ? undefined
+        : userById.get(savedSearch.createdBy),
+    updatedBy:
+      savedSearch.updatedBy == null
+        ? undefined
+        : userById.get(savedSearch.updatedBy),
+    alerts: alertsBySavedSearchId[savedSearch._id]?.map(alert => ({
+      ...alert,
       ...resolveAlertDisplayFields(alert, { savedSearch }),
     })),
   }));
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion
+  return response as unknown as SavedSearchListApiResponse[];
 }
 
 export function getSavedSearch(teamId: string, savedSearchId: string) {
-  return SavedSearch.findOne({ _id: savedSearchId, team: teamId })
-    .populate('createdBy', 'email name')
-    .populate('updatedBy', 'email name');
+  return getDatastore().savedSearches.getById(teamId, savedSearchId);
 }
 
 export function createSavedSearch(
@@ -46,12 +110,7 @@ export function createSavedSearch(
   savedSearch: SavedSearchWithoutId,
   userId?: string,
 ) {
-  return SavedSearch.create({
-    ...savedSearch,
-    team: teamId,
-    createdBy: userId,
-    updatedBy: userId,
-  });
+  return getDatastore().savedSearches.create(teamId, savedSearch, userId);
 }
 
 export function updateSavedSearch(
@@ -60,38 +119,31 @@ export function updateSavedSearch(
   savedSearch: SavedSearchWithoutId,
   userId?: string,
 ) {
-  // Callers may pass a merged stored document, which carries `createdBy`.
-  // Drop it so a spread can never rewrite ownership attribution.
-  const { createdBy: _createdBy, ...safeSavedSearch } =
-    savedSearch as SavedSearchWithoutId & { createdBy?: unknown };
-  return SavedSearch.findOneAndUpdate(
-    { _id: savedSearchId, team: teamId },
-    {
-      ...safeSavedSearch,
-      team: teamId,
-      updatedBy: userId,
-    },
-    { new: true },
+  // The repositories never rewrite createdBy, so callers may pass a merged
+  // stored record.
+  return getDatastore().savedSearches.update(
+    teamId,
+    savedSearchId,
+    savedSearch,
+    userId,
   );
 }
 
 export async function deleteSavedSearch(teamId: string, savedSearchId: string) {
-  const savedSearch = await SavedSearch.findOne({
-    _id: savedSearchId,
-    team: teamId,
-  });
+  const { savedSearches } = getDatastore();
+  const savedSearch = await savedSearches.getById(teamId, savedSearchId);
   if (savedSearch == null) {
     return null;
   }
   // Delete dependent alerts before the parent. Without a transaction (which
   // requires a replica set), the deletes are not atomic, so this order picks
   // the least-bad partial-failure mode: if deleteSavedSearchAlerts throws,
-  // nothing is deleted and the caller can retry. If the final deleteOne throws
+  // nothing is deleted and the caller can retry. If the final delete throws
   // after the alerts are gone, the search survives without its alerts —
   // recoverable by re-creating alerts, and strictly better than the reverse
   // order's failure mode (orphaned alerts pointing at a deleted saved search).
   await deleteSavedSearchAlerts(savedSearchId, teamId);
-  await SavedSearch.deleteOne({ _id: savedSearchId, team: teamId });
+  await savedSearches.delete(teamId, savedSearchId);
   // Re-sweep after the parent is gone: a concurrent alert-create targeting this
   // saved search could land between the two deletes above and orphan itself.
   // Once the parent no longer exists this second sweep cleans up any such alert

@@ -1,9 +1,7 @@
+import { getDatastore } from '@/datastore';
+import type { WebhookRecord } from '@/datastore/types';
 import type { ObjectId } from '@/models';
-import Alert from '@/models/alert';
-import Webhook, {
-  type WebhookDocument,
-  WebhookService,
-} from '@/models/webhook';
+import { WebhookService } from '@/models/webhook';
 import { validateWebhookConfig } from '@/utils/validators';
 
 export interface WebhookInput {
@@ -23,34 +21,15 @@ export interface WebhookInput {
  */
 export async function createWebhook(
   team: ObjectId | string,
-  {
-    name,
-    service,
-    url,
-    description,
-    titleEmoji,
-    queryParams,
-    headers,
-    body,
-  }: WebhookInput,
+  input: WebhookInput,
 ) {
-  validateWebhookConfig({ service, url, body });
+  validateWebhookConfig(input);
 
-  return Webhook.create({
-    team,
-    name,
-    service,
-    url,
-    description,
-    titleEmoji,
-    queryParams,
-    headers,
-    body,
-  });
+  return getDatastore().webhooks.create(String(team), input);
 }
 
 export type UpdateWebhookResult =
-  | { status: 'ok'; webhook: WebhookDocument }
+  | { status: 'ok'; webhook: WebhookRecord }
   | { status: 'not_found' }
   | { status: 'conflict' };
 
@@ -64,70 +43,49 @@ export type UpdateWebhookResult =
 export async function updateWebhook(
   team: ObjectId | string,
   webhookId: string,
-  {
-    name,
-    service,
-    url,
-    description,
-    titleEmoji,
-    queryParams,
-    headers,
-    body,
-  }: WebhookInput,
+  input: WebhookInput,
 ): Promise<UpdateWebhookResult> {
-  const existing = await Webhook.findOne({ _id: webhookId, team });
+  const { webhooks } = getDatastore();
+  const teamId = String(team);
+  const existing = await webhooks.getById(teamId, webhookId);
   if (existing == null) {
     return { status: 'not_found' };
   }
 
+  const { name, service, url, description, titleEmoji, body } = input;
   validateWebhookConfig({ service, url, body });
 
   const destinationChanged =
     url !== existing.url || service !== existing.service;
 
-  const setFields: Record<string, unknown> = { name, service, url };
-  const unsetFields: Record<string, 1> = {};
-
-  if (description === undefined) unsetFields.description = 1;
-  else setFields.description = description;
-
-  if (titleEmoji === undefined) unsetFields.titleEmoji = 1;
-  else setFields.titleEmoji = titleEmoji;
-
-  if (body === undefined) unsetFields.body = 1;
-  else setFields.body = body;
-
-  if (headers === undefined) {
-    if (destinationChanged) unsetFields.headers = 1;
-  } else if (Object.keys(headers).length === 0) {
-    unsetFields.headers = 1;
-  } else {
-    setFields.headers = headers;
-  }
-
-  if (queryParams === undefined) {
-    if (destinationChanged) unsetFields.queryParams = 1;
-  } else if (Object.keys(queryParams).length === 0) {
-    unsetFields.queryParams = 1;
-  } else {
-    setFields.queryParams = queryParams;
-  }
-
-  const updateOp: Record<string, unknown> =
-    Object.keys(unsetFields).length > 0
-      ? { $set: setFields, $unset: unsetFields }
-      : { $set: setFields };
+  const resolveMap = (
+    incoming: Record<string, string> | undefined,
+    stored: Record<string, string> | undefined,
+  ) => {
+    if (incoming === undefined) return destinationChanged ? undefined : stored;
+    return Object.keys(incoming).length === 0 ? undefined : incoming;
+  };
 
   // Pin to the snapshotted url/service so a concurrent destination change
   // yields a conflict rather than attaching a secret to the wrong destination.
-  const webhook = await Webhook.findOneAndUpdate(
-    { _id: webhookId, team, url: existing.url, service: existing.service },
-    updateOp,
-    { new: true },
+  const webhook = await webhooks.replace(
+    teamId,
+    webhookId,
+    {
+      name,
+      service,
+      url,
+      description,
+      titleEmoji,
+      body,
+      headers: resolveMap(input.headers, existing.headers),
+      queryParams: resolveMap(input.queryParams, existing.queryParams),
+    },
+    { url: existing.url, service: existing.service },
   );
 
   if (webhook == null) {
-    const stillExists = await Webhook.exists({ _id: webhookId, team });
+    const stillExists = await webhooks.getById(teamId, webhookId);
     return stillExists != null
       ? { status: 'conflict' }
       : { status: 'not_found' };
@@ -137,7 +95,7 @@ export async function updateWebhook(
 }
 
 export type DeleteWebhookResult =
-  | { status: 'ok'; webhook: WebhookDocument }
+  | { status: 'ok'; webhook: WebhookRecord }
   | { status: 'not_found' }
   | { status: 'referenced'; alertCount: number };
 
@@ -149,17 +107,16 @@ export async function deleteWebhook(
   team: ObjectId | string,
   webhookId: string,
 ): Promise<DeleteWebhookResult> {
+  const { alerts, webhooks } = getDatastore();
+  const teamId = String(team);
   // Match on webhookId alone (not channel.type) so a legacy/skewed alert that
   // still references this webhook also blocks deletion.
-  const alertCount = await Alert.countDocuments({
-    'channel.webhookId': webhookId,
-    team,
-  });
+  const alertCount = await alerts.countByWebhook(teamId, webhookId);
   if (alertCount > 0) {
     return { status: 'referenced', alertCount };
   }
 
-  const deleted = await Webhook.findOneAndDelete({ _id: webhookId, team });
+  const deleted = await webhooks.delete(teamId, webhookId);
   if (deleted == null) {
     return { status: 'not_found' };
   }

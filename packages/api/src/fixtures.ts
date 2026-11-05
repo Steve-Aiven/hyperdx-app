@@ -15,10 +15,10 @@ import request from 'supertest';
 
 import * as config from '@/config';
 import { AlertInput } from '@/controllers/alerts';
-import { getTeam } from '@/controllers/team';
-import { findUserByEmail } from '@/controllers/user';
 import { mongooseConnection } from '@/models';
 import { AlertInterval, AlertSource } from '@/models/alert';
+import Team from '@/models/team';
+import User from '@/models/user';
 import Server from '@/server';
 import logger from '@/utils/logger';
 import { MetricModel } from '@/utils/logParser';
@@ -228,8 +228,10 @@ export const getLoggedInAgent = async (
     .send({ ...creds, confirmPassword: creds.password })
     .expect(200);
 
-  const user = await findUserByEmail(creds.email);
-  const team = await getTeam(user?.team as any);
+  // Read through the models, not the datastore: tests rely on mongoose
+  // documents (ObjectId ids, save()).
+  const user = await User.findOne({ email: creds.email.toLowerCase() });
+  const team = await Team.findById(user?.team);
 
   if (team === null || user === null) {
     throw Error('team or user not found');

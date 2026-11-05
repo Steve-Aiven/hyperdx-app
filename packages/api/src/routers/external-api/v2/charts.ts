@@ -14,7 +14,7 @@ import { ClickhouseClient } from '@/clickhouse';
 import { getConnectionById } from '@/controllers/connection';
 import { getSource } from '@/controllers/sources';
 import { getTeam } from '@/controllers/team';
-import { IConnection } from '@/models/connection';
+import type { ConnectionRecord } from '@/datastore/types';
 import { ISource } from '@/models/source';
 import { validateRequestWithEnhancedErrors as validateRequest } from '@/utils/enhancedErrors';
 import {
@@ -225,7 +225,7 @@ const buildChartConfigFromRequest = async (
     teamId: string;
   },
   source: ISource,
-  connection: IConnection,
+  connection: Pick<ConnectionRecord, '_id'>,
 ): Promise<{
   chartConfig: ChartConfigWithOptDateRange;
   groupByFields: string[] | undefined;

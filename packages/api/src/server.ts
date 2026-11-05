@@ -5,8 +5,8 @@ import { serializeError } from 'serialize-error';
 import app from '@/api-app';
 import * as config from '@/config';
 import { LOCAL_APP_TEAM } from '@/controllers/team';
+import { getDatastore } from '@/datastore';
 import { runStartupMigrations } from '@/migrations';
-import { connectDBWithRetry, mongooseConnection } from '@/models';
 import opampApp from '@/opamp/app';
 import { setupTeamDefaults } from '@/setupDefaults';
 import logger from '@/utils/logger';
@@ -30,18 +30,18 @@ export default class Server {
   protected async shutdown(_signal?: string) {
     let hasError = false;
     logger.info('Closing all db clients...');
-    const [mongoCloseResult] = await Promise.allSettled([
-      mongooseConnection.close(false),
+    const [closeResult] = await Promise.allSettled([
+      getDatastore().disconnect(),
     ]);
 
-    if (mongoCloseResult.status === 'rejected') {
+    if (closeResult.status === 'rejected') {
       hasError = true;
       logger.error(
-        { err: serializeError(mongoCloseResult.reason) },
-        'MongoDB client close failed',
+        { err: serializeError(closeResult.reason) },
+        'Datastore client close failed',
       );
     } else {
-      logger.info('MongoDB client closed.');
+      logger.info('Datastore client closed.');
     }
 
     if (hasError) {
@@ -95,12 +95,15 @@ export default class Server {
 
     // The HTTP servers above are already listening so that `/health`
     // (liveness) responds while we connect; `/ready` (readiness) stays 503
-    // until the connection below succeeds. Retries forever — see
-    // connectDBWithRetry for why a single failed initial connect must not be
-    // allowed to leave the process running but permanently unable to serve.
-    await connectDBWithRetry();
+    // until the connection below succeeds. Retries forever - a single failed
+    // initial connect must not leave the process running but permanently
+    // unable to serve (https://github.com/hyperdxio/hyperdx/issues/2966).
+    await getDatastore().connectWithRetry();
 
-    await runStartupMigrations();
+    // Mongo-only startup migrations (e.g. alert displayName backfill).
+    if (getDatastore().backend === 'mongo') {
+      await runStartupMigrations();
+    }
 
     // Initialize default connections and sources for local app mode
     if (config.IS_LOCAL_APP_MODE) {

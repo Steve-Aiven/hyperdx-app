@@ -6,8 +6,8 @@ import {
   deleteWebhook,
   updateWebhook,
 } from '@/controllers/webhook';
-import { WebhookDocument } from '@/models/webhook';
-import Webhook from '@/models/webhook';
+import { getDatastore } from '@/datastore';
+import type { WebhookRecord } from '@/datastore/types';
 import { processRequestWithEnhancedErrors as validateRequest } from '@/utils/enhancedErrors';
 import { isDuplicateKeyError } from '@/utils/errors';
 import { getCounter } from '@/utils/instrumentation';
@@ -59,26 +59,26 @@ const webhookSerializationErrorCounter = getCounter(
 // reconcile rather than assuming the create/update failed.
 function respondPersistedButUnserializable(
   res: express.Response,
-  webhook: WebhookDocument,
+  webhook: WebhookRecord,
 ) {
   logger.error({
     message:
       'Webhook persisted but could not be serialized for the external API response',
-    webhookId: webhook._id.toString(),
+    webhookId: webhook._id,
     service: webhook.service,
   });
   webhookSerializationErrorCounter.add(1, { service: String(webhook.service) });
   return res.status(500).json({
     message: 'Webhook was saved but could not be serialized for the response',
-    id: webhook._id.toString(),
+    id: webhook._id,
   });
 }
 
 function formatExternalWebhook(
-  webhook: WebhookDocument,
+  webhook: WebhookRecord,
 ): ExternalWebhook | undefined {
-  // Convert to JSON so that any ObjectIds are converted to strings ("_id" is also converted to "id")
-  const json = JSON.stringify(webhook.toJSON({ getters: true }));
+  // JSON round-trip turns dates into strings, as the response will.
+  const json = JSON.stringify(webhook);
 
   // Parse using the externalWebhookSchema to strip out any fields not defined in the schema
   const parseResult = externalWebhookSchema.safeParse(JSON.parse(json));
@@ -352,12 +352,12 @@ router.get(
       }
 
       const { limit, offset } = getPagination(req.query);
-      const filter = { team: teamId.toString() };
-      // Sort by _id so skip/offset paging is stable across requests.
-      const [webhooks, total] = await Promise.all([
-        Webhook.find(filter).sort({ _id: 1 }).skip(offset).limit(limit),
-        Webhook.countDocuments(filter),
-      ]);
+      // Sorted by _id so skip/offset paging is stable across requests.
+      const all = (
+        await getDatastore().webhooks.listByTeam(teamId.toString())
+      ).sort((a, b) => (a._id < b._id ? -1 : a._id > b._id ? 1 : 0));
+      const total = all.length;
+      const webhooks = all.slice(offset, offset + limit);
 
       // Surface the full count at the HTTP layer too, so a client that reads
       // headers but not the `meta` body can still detect truncation.

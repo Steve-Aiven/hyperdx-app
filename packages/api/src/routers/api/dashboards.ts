@@ -89,7 +89,7 @@ function getFilterSourceRefs(
  * reject.
  */
 async function validateFilterSources(
-  teamId: ObjectId,
+  teamId: ObjectId | string,
   filters: DashboardFilter[] = [],
   existingFilters: DashboardFilter[] = [],
 ): Promise<string | null> {
@@ -185,7 +185,7 @@ router.post(
 
       const newDashboard = await createDashboard(teamId, dashboard, userId);
 
-      res.json(newDashboard.toJSON());
+      res.json(newDashboard);
     } catch (e) {
       next(e);
     }

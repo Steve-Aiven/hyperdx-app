@@ -6,9 +6,8 @@ import { validateRequest } from 'zod-express-middleware';
 
 import * as config from '@/config';
 import { createTeam, isTeamExisting } from '@/controllers/team';
+import { getDatastore } from '@/datastore';
 import { handleAuthError, redirectToDashboard } from '@/middleware/auth';
-import TeamInvite from '@/models/teamInvite';
-import User from '@/models/user'; // TODO -> do not import model directly
 import { setupTeamDefaults } from '@/setupDefaults';
 import logger from '@/utils/logger';
 import passport from '@/utils/passport';
@@ -39,19 +38,22 @@ router.get('/health', async (req, res) => {
   });
 });
 
-// Readiness: 503 unless MongoDB is connected. Nearly every route is
-// Mongo-backed, so a pod without a Mongo connection cannot serve traffic and
-// should be removed from Service endpoints (see utils/readiness.ts).
+// Readiness: 503 unless the app-state datastore is connected. Nearly every
+// route is datastore-backed, so a pod without a connection cannot serve
+// traffic and should be removed from Service endpoints (see utils/readiness.ts).
 router.get('/ready', async (req, res) => {
   if (isMongoConnected()) {
     return res.send({
       data: 'OK',
       version: config.CODE_VERSION,
       env: config.NODE_ENV,
+      datastore: config.DATASTORE,
     });
   }
   res.status(503).send({
     status: 'unavailable',
+    datastore: config.DATASTORE,
+    // Keep `mongo` key for older probes; value is the generic ready-state name.
     mongo: mongoReadyStateName(),
   });
 });
@@ -89,50 +91,44 @@ router.post(
         return res.status(409).json({ error: 'teamAlreadyExists' });
       }
 
-      (User as any).register(
-        new User({ email }),
-        password,
-        async (err: Error, user: any) => {
-          if (err) {
-            logger.error(
-              { err: serializeError(err) },
-              'User registration error',
-            );
-            return res.status(400).json({ error: 'invalid' });
-          }
+      const { users } = getDatastore();
 
-          const team = await createTeam({
-            name: `${email}'s Team`,
-            collectorAuthenticationEnforced: true,
-          });
-          user.team = team._id;
-          user.name = email;
-          await user.save();
+      let user;
+      try {
+        user = await users.register({ email, password });
+      } catch (err) {
+        logger.error({ err: serializeError(err) }, 'User registration error');
+        return res.status(400).json({ error: 'invalid' });
+      }
 
-          // Set up default connections and sources for this new team
-          try {
-            await setupTeamDefaults(team._id.toString());
-          } catch (error) {
-            logger.error(
-              { err: serializeError(error) },
-              'Failed to setup team defaults',
-            );
-            // Continue with registration even if setup defaults fails
-          }
+      const team = await createTeam({
+        name: `${email}'s Team`,
+        collectorAuthenticationEnforced: true,
+      });
+      await users.update(user._id, { teamId: team._id, name: email });
 
-          return passport.authenticate('local')(req, res, () => {
-            if (req?.user?.team) {
-              return res.status(200).json({ status: 'success' });
-            }
+      // Set up default connections and sources for this new team
+      try {
+        await setupTeamDefaults(team._id.toString());
+      } catch (error) {
+        logger.error(
+          { err: serializeError(error) },
+          'Failed to setup team defaults',
+        );
+        // Continue with registration even if setup defaults fails
+      }
 
-            logger.error(
-              { userId: req?.user?._id },
-              'Password login for user failed, user or team not found',
-            );
-            return res.status(400).json({ error: 'invalid' });
-          });
-        },
-      );
+      return passport.authenticate('local')(req, res, () => {
+        if (req?.user?.team) {
+          return res.status(200).json({ status: 'success' });
+        }
+
+        logger.error(
+          { userId: req?.user?._id },
+          'Password login for user failed, user or team not found',
+        );
+        return res.status(400).json({ error: 'invalid' });
+      });
     } catch (e) {
       next(e);
     }
@@ -166,38 +162,35 @@ router.post('/team/setup/:token', async (req, res, next) => {
       );
     }
 
-    const teamInvite = await TeamInvite.findOne({
-      token: req.params.token,
-    });
+    const { users, teamInvites } = getDatastore();
+    const teamInvite = await teamInvites.findByToken(token);
     if (!teamInvite) {
       return res.status(401).send('Invalid token');
     }
 
-    (User as any).register(
-      new User({
+    let user;
+    try {
+      user = await users.register({
         email: teamInvite.email,
         name: teamInvite.email,
-        team: teamInvite.teamId,
-      }),
-      password,
-      async (err: Error, user: any) => {
-        if (err) {
-          logger.error({ err: serializeError(err) }, 'Team setup error');
-          return res.redirect(
-            `${config.FRONTEND_REDIRECT_BASE}/join-team?token=${token}&err=500`,
-          );
-        }
+        teamId: teamInvite.teamId,
+        password,
+      });
+    } catch (err) {
+      logger.error({ err: serializeError(err) }, 'Team setup error');
+      return res.redirect(
+        `${config.FRONTEND_REDIRECT_BASE}/join-team?token=${token}&err=500`,
+      );
+    }
 
-        await TeamInvite.findByIdAndRemove(teamInvite._id);
+    await teamInvites.deleteById(teamInvite._id);
 
-        req.login(user, err => {
-          if (err) {
-            return next(err);
-          }
-          redirectToDashboard(req, res);
-        });
-      },
-    );
+    req.login(user, err => {
+      if (err) {
+        return next(err);
+      }
+      redirectToDashboard(req, res);
+    });
   } catch (e) {
     next(e);
   }

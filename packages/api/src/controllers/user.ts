@@ -1,14 +1,12 @@
 import type { OnboardingTaskId } from '@hyperdx/common-utils/dist/types';
 import { isPersistableUserId as isPersistableUserIdHex } from '@hyperdx/common-utils/dist/types';
-import mongoose from 'mongoose';
-import { v4 as uuidv4 } from 'uuid';
 
+import { getDatastore } from '@/datastore';
 import type { ObjectId } from '@/models';
-import Alert from '@/models/alert';
-import User from '@/models/user';
 import logger from '@/utils/logger';
+
 export function findUserByAccessKey(accessKey: string) {
-  return User.findOne({ accessKey });
+  return getDatastore().users.findByAccessKey(accessKey);
 }
 
 /**
@@ -19,20 +17,20 @@ export function findUserByAccessKey(accessKey: string) {
  * requests presenting the old key start 401ing the instant this returns.
  */
 export function rotateUserAccessKey(userId: string | ObjectId) {
-  return User.findByIdAndUpdate(userId, { accessKey: uuidv4() }, { new: true });
+  return getDatastore().users.rotateAccessKey(userId.toString());
 }
 
-export function findUserById(id: string) {
-  return User.findById(id);
+export function findUserById(id: string | ObjectId) {
+  return getDatastore().users.findById(id.toString());
 }
 
+// Backends match emails case-insensitively (emails are stored lowercased).
 export function findUserByEmail(email: string) {
-  // Case-insensitive email search - lowercase the email since User model stores emails in lowercase
-  return User.findOne({ email: email.toLowerCase() });
+  return getDatastore().users.findByEmail(email);
 }
 
 export function findUsersByTeam(team: string | ObjectId) {
-  return User.find({ team }).sort({ createdAt: 1 });
+  return getDatastore().users.findByTeam(team.toString());
 }
 
 // Type-guard wrapper over the shared 24-hex check; rejects the synthetic
@@ -45,18 +43,14 @@ function isPersistableUserId(
 
 // Returns null for a non-persistable user so the route reports unchanged
 // default state rather than a write that silently matched nothing.
-export function completeOnboardingTask(
+export async function completeOnboardingTask(
   userId: string | ObjectId,
   taskId: OnboardingTaskId,
 ) {
   if (!isPersistableUserId(userId)) {
     return null;
   }
-  return User.findByIdAndUpdate(
-    userId,
-    { $addToSet: { 'onboardingData.completedTasks': taskId } },
-    { new: true },
-  );
+  return getDatastore().users.completeOnboardingTask(userId.toString(), taskId);
 }
 
 export function setOnboardingDismissed(
@@ -66,17 +60,16 @@ export function setOnboardingDismissed(
   if (!isPersistableUserId(userId)) {
     return null;
   }
-  return User.findByIdAndUpdate(
-    userId,
-    { $set: { 'onboardingData.isDismissed': isDismissed } },
-    { new: true },
+  return getDatastore().users.setOnboardingDismissed(
+    userId.toString(),
+    isDismissed,
   );
 }
 
 // Fire-and-forget recording from an unrelated write path (alert/dashboard save,
 // MCP tool call): must never fail or delay the triggering operation, so errors
-// are swallowed. The $ne skips the write once already recorded — these fire on
-// every save / tool call, so it avoids write amplification on hot paths.
+// are swallowed. These fire on every save / tool call; the repositories skip
+// the write once the task is recorded.
 export function recordOnboardingTaskCompletion(
   userId: string | ObjectId | undefined | null,
   taskId: OnboardingTaskId,
@@ -84,36 +77,24 @@ export function recordOnboardingTaskCompletion(
   if (!isPersistableUserId(userId)) {
     return;
   }
-  void User.updateOne(
-    { _id: userId, 'onboardingData.completedTasks': { $ne: taskId } },
-    { $addToSet: { 'onboardingData.completedTasks': taskId } },
-  ).catch(err => {
-    logger.warn(
-      { error: err, userId: userId.toString(), taskId },
-      'Failed to record onboarding task completion',
-    );
-  });
+  void getDatastore()
+    .users.completeOnboardingTask(userId.toString(), taskId)
+    .catch(err => {
+      logger.warn(
+        { error: err, userId: userId.toString(), taskId },
+        'Failed to record onboarding task completion',
+      );
+    });
 }
 
-export async function deleteTeamMember(
+export function deleteTeamMember(
   teamId: string | ObjectId,
   userIdToDelete: string,
   userIdRequestingDelete: string | ObjectId,
 ) {
-  const [, deletedUser] = await Promise.all([
-    Alert.updateMany(
-      { createdBy: new mongoose.Types.ObjectId(userIdToDelete), team: teamId },
-      {
-        $set: {
-          createdBy: new mongoose.Types.ObjectId(userIdRequestingDelete),
-        },
-      },
-    ),
-    User.findOneAndDelete({
-      team: teamId,
-      _id: userIdToDelete,
-    }),
-  ]);
-
-  return deletedUser;
+  return getDatastore().users.deleteFromTeam(
+    teamId.toString(),
+    userIdToDelete,
+    userIdRequestingDelete.toString(),
+  );
 }

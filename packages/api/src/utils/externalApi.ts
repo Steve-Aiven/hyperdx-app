@@ -15,19 +15,15 @@ import {
   SavedChartConfig,
 } from '@hyperdx/common-utils/dist/types';
 import { omit } from 'lodash';
-import { Types } from 'mongoose';
 
-import type { ObjectId } from '@/models';
+import type { AlertWithDisplayRefs } from '@/controllers/alertRefs';
 import {
   AlertChannel,
-  AlertDocument,
   AlertInterval,
   AlertState,
   getAlertChannels,
-  IAlert,
 } from '@/models/alert';
 import type { DashboardDocument, IDashboard } from '@/models/dashboard';
-import type { ISavedSearch } from '@/models/savedSearch';
 import { SeriesTile } from '@/routers/external-api/v2/utils/dashboards';
 import {
   isPopulatedRef,
@@ -367,64 +363,32 @@ export type ExternalAlert = {
   updatedAt?: string;
 };
 
-// An alert's savedSearch/dashboard ref as this module receives it: a bare
-// ObjectId, or — when the caller used a populating reader — the referenced
-// document, possibly projected down to the display fields.
-type AlertRef<T> = ObjectId | (Partial<T> & { _id: ObjectId }) | null;
-
-type AlertRefFields = {
-  savedSearch?: AlertRef<ISavedSearch>;
-  dashboard?: AlertRef<IDashboard>;
-};
-
-type AlertDocumentObject = Omit<IAlert, keyof AlertRefFields> & {
-  _id: ObjectId;
-} & AlertRefFields;
-
-export type TranslatableAlertDocument = Omit<
-  AlertDocument,
-  keyof AlertRefFields
-> &
-  AlertRefFields;
-
 /**
- * A populated ref whose target was deleted resolves to `null` in `toJSON()`,
- * but Mongoose still holds the original id in `populated()`. Prefer that so the
- * response keeps pointing at the (now dangling) dashboard/saved search instead
- * of silently dropping the field.
+ * An alert as this module receives it: a plain record whose savedSearch and
+ * dashboard refs are bare ids, or the referenced documents when the caller
+ * used a `*WithDisplayRefs` reader. A ref whose target was deleted stays a
+ * bare id, so the response keeps pointing at the dangling reference.
  */
+export type TranslatableAlertDocument = AlertWithDisplayRefs;
+
 function refIdToString(
-  ref: AlertRef<object> | undefined,
-  populatedId: ObjectId | undefined,
+  ref: AlertWithDisplayRefs['savedSearch' | 'dashboard'],
 ): string | undefined {
   if (ref == null) {
-    return populatedId?.toString();
+    return undefined;
   }
   return (isPopulatedRef(ref) ? ref._id : ref).toString();
 }
 
-/**
- * Mongoose types `populated()` as `any`; it returns the original ObjectId for
- * a populated single ref, and undefined when the path was never populated.
- */
-function populatedRefId(
-  alert: TranslatableAlertDocument,
-  path: keyof AlertRefFields,
-): ObjectId | undefined {
-  const id: unknown =
-    typeof alert.populated === 'function' ? alert.populated(path) : undefined;
-  return id instanceof Types.ObjectId ? id : undefined;
-}
-
 function hasCreatedAt(
-  alert: AlertDocumentObject,
-): alert is AlertDocument & { createdAt: Date } {
+  alert: AlertWithDisplayRefs,
+): alert is AlertWithDisplayRefs & { createdAt: Date } {
   return 'createdAt' in alert && alert.createdAt instanceof Date;
 }
 
 function hasUpdatedAt(
-  alert: AlertDocumentObject,
-): alert is AlertDocument & { updatedAt: Date } {
+  alert: AlertWithDisplayRefs,
+): alert is AlertWithDisplayRefs & { updatedAt: Date } {
   return 'updatedAt' in alert && alert.updatedAt instanceof Date;
 }
 
@@ -447,7 +411,7 @@ function transformScheduleStartAt(
 }
 
 function transformSilencedToExternalSilenced(
-  silenced: AlertDocumentObject['silenced'],
+  silenced: AlertWithDisplayRefs['silenced'],
 ): ExternalAlert['silenced'] {
   return silenced
     ? {
@@ -459,7 +423,7 @@ function transformSilencedToExternalSilenced(
 }
 
 function transformErrorsToExternalErrors(
-  errors: AlertDocumentObject['executionErrors'],
+  errors: AlertWithDisplayRefs['executionErrors'],
 ): ExternalAlert['executionErrors'] {
   return errors?.map(err => ({
     timestamp:
@@ -480,13 +444,7 @@ function transformErrorsToExternalErrors(
 export function translateAlertDocumentToExternalAlert(
   alert: TranslatableAlertDocument,
 ): ExternalAlert {
-  // Convert to plain object if it's a Mongoose document. `flattenMaps: false`
-  // picks the toJSON overload that doesn't wrap every field in FlattenMaps<>
-  // (which breaks ObjectId); the alert schema has no Map fields, so the
-  // runtime output is identical.
-  const alertObj: AlertDocumentObject = alert.toJSON
-    ? alert.toJSON({ flattenMaps: false })
-    : { ...alert };
+  const alertObj = alert;
 
   const channels = getAlertChannels(alertObj);
 
@@ -521,14 +479,8 @@ export function translateAlertDocumentToExternalAlert(
     ...(channels.length > 0 && { channel: channels[0], channels }),
     teamId: alertObj.team.toString(),
     tileId: alertObj.tileId ?? undefined,
-    dashboardId: refIdToString(
-      alertObj.dashboard,
-      populatedRefId(alert, 'dashboard'),
-    ),
-    savedSearchId: refIdToString(
-      alertObj.savedSearch,
-      populatedRefId(alert, 'savedSearch'),
-    ),
+    dashboardId: refIdToString(alertObj.dashboard),
+    savedSearchId: refIdToString(alertObj.savedSearch),
     groupBy: alertObj.groupBy ?? undefined,
     silenced: transformSilencedToExternalSilenced(alertObj.silenced),
     executionErrors: transformErrorsToExternalErrors(alertObj.executionErrors),

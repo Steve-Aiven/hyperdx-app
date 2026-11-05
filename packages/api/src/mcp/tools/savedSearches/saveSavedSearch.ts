@@ -2,6 +2,7 @@ import * as config from '@/config';
 import {
   createSavedSearch,
   getSavedSearch,
+  toExternalSavedSearch,
   updateSavedSearch,
 } from '@/controllers/savedSearch';
 import { getSource } from '@/controllers/sources';
@@ -93,7 +94,7 @@ export function registerSaveSavedSearch({
               type: 'text' as const,
               text: JSON.stringify(
                 {
-                  ...updated.toExternalJSON(),
+                  ...toExternalSavedSearch(updated),
                   ...(frontendUrl
                     ? { url: `${frontendUrl}/search/${updated._id}` }
                     : {}),
@@ -115,7 +116,7 @@ export function registerSaveSavedSearch({
             type: 'text' as const,
             text: JSON.stringify(
               {
-                ...created.toExternalJSON(),
+                ...toExternalSavedSearch(created),
                 ...(frontendUrl
                   ? { url: `${frontendUrl}/search/${created._id}` }
                   : {}),

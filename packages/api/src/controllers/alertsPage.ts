@@ -1,11 +1,11 @@
 import { MAX_ALERT_DISPLAY_NAME_LENGTH } from '@hyperdx/common-utils/dist/types';
-import { escapeRegExp } from 'lodash';
-import type { FilterQuery } from 'mongoose';
 import { z } from 'zod';
 
-import { ALERT_PAGE_POPULATE, type AlertPageRefs } from '@/controllers/alerts';
+import { populatePageRefs } from '@/controllers/alertRefs';
+import { getDatastore } from '@/datastore';
+import type { AlertFilter } from '@/datastore/types';
 import type { ObjectId } from '@/models';
-import Alert, { AlertSource, AlertState, IAlert } from '@/models/alert';
+import { AlertSource, AlertState } from '@/models/alert';
 import { decodeCursor, encodeCursor } from '@/utils/pagination';
 import { objectIdSchema, stringListQueryParam, tagsSchema } from '@/utils/zod';
 
@@ -25,8 +25,6 @@ const alertsPageCursorSchema = z.object({
   n: z.string().nullable(),
   id: objectIdSchema,
 });
-
-type AlertsPageCursor = z.infer<typeof alertsPageCursorSchema>;
 
 /** Filter parameters shared by the internal alerts page and the v2 list endpoint. */
 export const alertsFilterShape = {
@@ -90,116 +88,46 @@ export const alertsPageQuerySchema = z
 
 export type AlertsPageParams = z.infer<typeof alertsPageQuerySchema>;
 
-/** Mongo filter for the shared filter parameters, scoped to the team. */
-export function buildAlertsFilter(
-  teamId: ObjectId | string,
-  params: AlertsFilterParams,
-): FilterQuery<IAlert> {
-  const filter: FilterQuery<IAlert> = { team: teamId };
-
-  if (params.tag != null) {
-    filter.tags = { $in: params.tag };
-  }
-
-  if (params.state != null) {
-    // OK is the default value when state is missing from the document, so we include
-    // documents without the field as well when filtering for OK state alerts.
-    filter.state = inOrMissing(params.state, AlertState.OK);
-  }
-
-  if (params.source != null) {
-    // SAVED_SEARCH is the default value when source is missing from the document, so we include
-    // documents without the field as well when filtering for saved-search alerts.
-    filter.source = inOrMissing(params.source, AlertSource.SAVED_SEARCH);
-  }
-
-  if (params.search) {
-    // Case-insensitive substring.
-    filter.displayName = {
-      $regex: escapeRegExp(params.search),
-      $options: 'i',
-    };
-  }
-
-  return filter;
-}
-
-/**
- * Mongo filters for a single page.
- */
-export function buildAlertsPageFilter(
-  teamId: ObjectId | string,
-  params: AlertsPageParams,
-): FilterQuery<IAlert> {
-  const filter = buildAlertsFilter(teamId, params);
-
-  if (params.createdBy != null) {
-    filter.createdBy = params.createdBy;
-  }
-
-  const cursor = params.cursor
-    ? decodeCursor(params.cursor, alertsPageCursorSchema)
-    : null;
-  if (cursor != null) {
-    applyCursor(filter, cursor);
-  }
-
-  return filter;
-}
-
-function inOrMissing<T extends string>(values: T[], schemaDefault: T) {
+/** Store-neutral filter for the shared filter parameters. */
+export function buildAlertsFilter(params: AlertsFilterParams): AlertFilter {
   return {
-    $in: values.includes(schemaDefault) ? [...values, null] : values,
+    tag: params.tag,
+    state: params.state,
+    source: params.source,
+    search: params.search,
   };
 }
 
-/**
- * Filters for documents strictly after `cursor` in `{displayName: 1, _id: 1}` order.
- *
- * Null and missing displayNames sort first as one block, so which predicate applies
- * depends on whether the page ended inside that block.
- */
-function applyCursor(
-  filter: FilterQuery<IAlert>,
-  cursor: AlertsPageCursor,
-): void {
-  // When the previous page ended inside the null block of displayNames,
-  // the next row may be another null displayName or a named one.
-  if (cursor.n === null) {
-    filter.$or = [
-      { displayName: null, _id: { $gt: cursor.id } },
-      { displayName: { $gte: '' } },
-    ];
-    return;
-  }
-
-  // Otherwise all remaining displayNames are non-null strings, so we find documents
-  // with displayNames after the cursor, or displayName equal to the cursor but with
-  // a higher _id.
-  filter.$or = [
-    { displayName: { $gt: cursor.n } },
-    { displayName: cursor.n, _id: { $gt: cursor.id } },
-  ];
-}
-
 export async function getAlertsPage(
-  teamId: ObjectId,
+  teamId: ObjectId | string,
   params: AlertsPageParams,
 ) {
   const { limit } = params;
-  const query = Alert.find(buildAlertsPageFilter(teamId, params))
-    .sort({ displayName: 1, _id: 1 })
-    .populate<AlertPageRefs>(ALERT_PAGE_POPULATE);
+  const team = String(teamId);
+  const cursor = params.cursor
+    ? decodeCursor(params.cursor, alertsPageCursorSchema)
+    : null;
 
   // One row past the page answers "is there more?" without a second count
   // query. Omitting limit keeps the legacy unpaginated response.
-  const docs = limit == null ? await query : await query.limit(limit + 1);
-  const hasMore = limit != null && docs.length > limit;
-  const data = hasMore ? docs.slice(0, limit) : docs;
-  const last = data.at(-1);
+  const rows = await getDatastore().alerts.list(
+    team,
+    { ...buildAlertsFilter(params), createdBy: params.createdBy },
+    {
+      sort: 'displayName',
+      ...(limit != null && { limit: limit + 1 }),
+      ...(cursor != null && {
+        cursor: { displayName: cursor.n, id: cursor.id },
+      }),
+    },
+  );
+  const hasMore = limit != null && rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const data = await populatePageRefs(team, page);
+  const last = page.at(-1);
   const nextCursor =
     hasMore && last != null
-      ? encodeCursor({ n: last.displayName ?? null, id: last._id.toString() })
+      ? encodeCursor({ n: last.displayName ?? null, id: last._id })
       : undefined;
 
   return { data, hasMore, nextCursor };

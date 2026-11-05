@@ -27,9 +27,10 @@ import {
   validateAlertInput,
 } from '@/controllers/alerts';
 import { alertsPageQuerySchema, getAlertsPage } from '@/controllers/alertsPage';
+import { getDatastore } from '@/datastore';
 import { AlertSource, getAlertChannels } from '@/models/alert';
 import { IAlertHistory } from '@/models/alertHistory';
-import { resolveAlertDisplayFields } from '@/utils/alerts';
+import { populatedRefOrNull, resolveAlertDisplayFields } from '@/utils/alerts';
 import { setBusinessContext } from '@/utils/instrumentation';
 import { PreSerialized, sendJson } from '@/utils/serialization';
 import { internalAlertSchema, objectIdSchema } from '@/utils/zod';
@@ -43,18 +44,18 @@ const formatAlertResponse = (
   history: Omit<IAlertHistory, 'alert'>[],
   { includeChartConfig = false }: { includeChartConfig?: boolean } = {},
 ): PreSerialized<AlertsPageItem> => {
+  // A ref whose target was deleted stays a bare id: nothing to render.
+  const savedSearch = populatedRefOrNull(alert.savedSearch);
+  const dashboard = populatedRefOrNull(alert.dashboard);
   return {
     history,
     // Resolved (stored ?? derived) so alerts written before the fields existed
     // still render. Deliberately not in the `pick` below -- a stored
     // `undefined` there would clobber the resolved value.
-    ...resolveAlertDisplayFields(alert, {
-      savedSearch: alert.savedSearch,
-      dashboard: alert.dashboard,
-    }),
+    ...resolveAlertDisplayFields(alert, { savedSearch, dashboard }),
     silenced: alert.silenced
       ? {
-          by: alert.silenced.by?.email,
+          by: alert.silenced.by?.email ?? '',
           at: alert.silenced.at,
           until: alert.silenced.until,
         }
@@ -74,14 +75,14 @@ const formatAlertResponse = (
     // dashboard populates as null, and that alert is the least addressable of
     // the lot. Omitted rather than `false` when fine, matching the manifest.
     ...(alert.source === AlertSource.TILE &&
-    isTileAlertUnaddressable(alert.dashboard ?? undefined, alert.tileId)
+    isTileAlertUnaddressable(dashboard ?? undefined, alert.tileId)
       ? { unaddressableTile: true }
       : {}),
-    ...(alert.dashboard && {
-      dashboardId: alert.dashboard._id,
+    ...(dashboard && {
+      dashboardId: dashboard._id,
       dashboard: {
-        name: alert.dashboard.name,
-        tiles: alert.dashboard.tiles
+        name: dashboard.name,
+        tiles: dashboard.tiles
           .filter(tile => tile.id === alert.tileId)
           .map(tile => ({
             id: tile.id,
@@ -89,9 +90,9 @@ const formatAlertResponse = (
           })),
       },
     }),
-    ...(alert.savedSearch && {
-      savedSearchId: alert.savedSearch._id,
-      savedSearch: { name: alert.savedSearch.name },
+    ...(savedSearch && {
+      savedSearchId: savedSearch._id,
+      savedSearch: { name: savedSearch.name },
     }),
     // Inline alerts carry their persisted config so edit surfaces can seed
     // the chart editor and the detail page can render the query — but only on
@@ -420,12 +421,13 @@ router.post(
       if (!alert) {
         return res.status(404).json({ error: 'Alert not found' });
       }
-      alert.silenced = {
-        by: req.user._id,
-        at: new Date(),
-        until: new Date(req.body.mutedUntil),
-      };
-      await alert.save();
+      await getDatastore().alerts.update(teamId.toString(), alert._id, {
+        silenced: {
+          by: req.user._id,
+          at: new Date(),
+          until: new Date(req.body.mutedUntil),
+        },
+      });
 
       res.sendStatus(200);
     } catch (e) {
@@ -452,8 +454,9 @@ router.delete(
       if (!alert) {
         return res.status(404).json({ error: 'Alert not found' });
       }
-      alert.silenced = undefined;
-      await alert.save();
+      await getDatastore().alerts.update(teamId.toString(), alert._id, {
+        silenced: undefined,
+      });
 
       res.sendStatus(200);
     } catch (e) {
