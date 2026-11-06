@@ -4,18 +4,37 @@ import * as config from '@/config';
 
 let pool: Pool | null = null;
 
+function buildSslConfig(connectionString: string) {
+  // node-pg: sslmode in the URL overrides the `ssl` option, so strip it and
+  // pass TLS explicitly. Aiven Runtime injects PROJECT_CA_CERT (base64).
+  const needsTls =
+    connectionString.includes('sslmode=require') ||
+    connectionString.includes('sslmode=verify-ca') ||
+    connectionString.includes('sslmode=verify-full') ||
+    Boolean(process.env.PROJECT_CA_CERT);
+  if (!needsTls) {
+    return undefined;
+  }
+  if (process.env.PROJECT_CA_CERT) {
+    return {
+      ca: Buffer.from(process.env.PROJECT_CA_CERT, 'base64').toString(),
+      rejectUnauthorized: true,
+    };
+  }
+  // Local/dev without the project CA: encrypt but skip server auth.
+  return { rejectUnauthorized: false };
+}
+
 export function getPool(): Pool {
   if (pool == null) {
     if (config.DATABASE_URL == null) {
       throw new Error('DATABASE_URL is not set');
     }
+    const url = new URL(config.DATABASE_URL);
+    url.searchParams.delete('sslmode');
     pool = new Pool({
-      connectionString: config.DATABASE_URL,
-      // Aiven PG requires TLS; sslmode in the URL is enough for most clients,
-      // but node-pg needs an explicit ssl object when the CA is not mounted.
-      ssl: config.DATABASE_URL.includes('sslmode=require')
-        ? { rejectUnauthorized: false }
-        : undefined,
+      connectionString: url.toString(),
+      ssl: buildSslConfig(config.DATABASE_URL),
       max: 20,
     });
   }
